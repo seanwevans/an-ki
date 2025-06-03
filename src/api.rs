@@ -3,7 +3,7 @@
 use warp::Filter;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::task_recovery_module::{TaskRecoveryManager, Task};
+use crate::task_recovery::{TaskRecoveryManager, Task};
 use uuid::Uuid;
 use warp::http::StatusCode;
 
