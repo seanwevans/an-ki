@@ -42,6 +42,9 @@ jsonwebtoken = "8.1"
 hmac = "0.12"
 sha2 = "0.10"
 
+# Base64 encoding/decoding
+base64 = "0.21"
+
 # Testing framework for lazy static initialization
 lazy_static = "1.4"
 
@@ -55,6 +58,7 @@ tokio = { version = "1", features = ["full"] }
 warp = "0.3"
 
 [features]
-default = ["full"]
+default = []
+full = []
 
 # Enable optional features for specific use cases
