@@ -56,5 +56,6 @@ warp = "0.3"
 
 [features]
 default = ["full"]
+full = []
 
 # Enable optional features for specific use cases
