@@ -23,7 +23,7 @@ A distributed neural network project that supports task scheduling, load balanci
 
 - **Task Scheduling:** Efficient task assignment using a load balancer and asynchronous execution.
 - **Fault Tolerance:** Built-in backup and recovery mechanisms for task persistence.
-- **Secure Communication:** JWT-based authentication and role-based access control.
+- **Secure Communication:** JWT-based authentication, role-based access control, and AES-GCM message encryption.
 - **Dynamic Node Discovery:** Uses a distributed hash table (DHT) for node management.
 - **Leader Election:** Ensures high availability with automatic leader selection.
 - **Monitoring and Metrics:** Supports Prometheus metrics and detailed logging for monitoring.
