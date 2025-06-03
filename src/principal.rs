@@ -3,6 +3,7 @@ use lapin::{options::*, types::FieldTable, BasicProperties, Connection, Connecti
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tracing::{error, info};
+use futures_util::stream::StreamExt;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct RoleAssignment {
@@ -44,8 +45,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     info!("Principal node is running and waiting for update requests...");
 
-    while let Some(delivery) = consumer.next().await {
-        let (_, delivery) = delivery.expect("error in consumer");
+    while let Some(delivery_result) = consumer.next().await {
+        let delivery = delivery_result?;
         let update_request: UpdateRequest = serde_json::from_slice(&delivery.data)?;
 
         info!("Received update request: {:?}", update_request);

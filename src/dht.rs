@@ -5,6 +5,7 @@ use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 use tracing::{info, error};
 use serde::{Deserialize, Serialize};
+use crate::database::Database;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct NodeInfo {
@@ -52,7 +53,7 @@ impl DHT {
 }
 
 // Store DHT in the database
-pub fn store_dht_in_db(dht: &DHT, db: &cockroachdb::Database) -> Result<(), Box<dyn std::error::Error>> {
+pub fn store_dht_in_db(dht: &DHT, db: &Database) -> Result<(), Box<dyn std::error::Error>> {
     let nodes = dht.list_nodes();
     for node in nodes {
         // Serialize NodeInfo and store it in the CockroachDB
@@ -66,7 +67,7 @@ pub fn store_dht_in_db(dht: &DHT, db: &cockroachdb::Database) -> Result<(), Box<
     Ok(())
 }
 
-pub fn load_dht_from_db(db: &cockroachdb::Database) -> Result<DHT, Box<dyn std::error::Error>> {
+pub fn load_dht_from_db(db: &Database) -> Result<DHT, Box<dyn std::error::Error>> {
     let mut dht = DHT::new();
     let rows = db.query("SELECT node_id, node_info FROM dht", &[])?;
     for row in rows {
