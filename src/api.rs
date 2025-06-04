@@ -3,7 +3,7 @@
 use warp::Filter;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::task_recovery_module::{TaskRecoveryManager, Task};
+use crate::task_recovery::{TaskRecoveryManager, Task};
 use uuid::Uuid;
 use warp::http::StatusCode;
 
@@ -64,14 +64,15 @@ async fn get_task_handler(
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let task_id = match Uuid::parse_str(&params.task_id) {
         Ok(uuid) => uuid,
-        Err(_) => return Ok(warp::reply::with_status("Invalid UUID", StatusCode::BAD_REQUEST)),
+        Err(_) => return Ok(warp::reply::with_status("Invalid UUID".to_string(), StatusCode::BAD_REQUEST)),
     };
 
     let tasks = task_manager.tasks.read().unwrap();
     if let Some(task) = tasks.get(&task_id) {
-        Ok(warp::reply::json(task))
+        let body = serde_json::to_string(task).unwrap_or_default();
+        Ok(warp::reply::with_status(body, StatusCode::OK))
     } else {
-        Ok(warp::reply::with_status("Task not found", StatusCode::NOT_FOUND))
+        Ok(warp::reply::with_status("Task not found".to_string(), StatusCode::NOT_FOUND))
     }
 }
 

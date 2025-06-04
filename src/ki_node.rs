@@ -4,6 +4,7 @@ use lapin::{options::*, types::FieldTable, BasicProperties, Connection, Connecti
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tracing::{error, info};
+use futures_util::stream::StreamExt;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct TaskMessage {
@@ -45,8 +46,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     info!("Ki node is running and waiting for tasks...");
 
-    while let Some(delivery) = consumer.next().await {
-        let (_, delivery) = delivery.expect("error in consumer");
+    while let Some(delivery_result) = consumer.next().await {
+        let delivery = delivery_result?;
         let task_message: TaskMessage = serde_json::from_slice(&delivery.data)?;
 
         info!("Received task: {:?}", task_message);

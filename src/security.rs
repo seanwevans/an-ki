@@ -8,6 +8,7 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, TokenData, 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
 use std::error::Error;
 use tracing::{error, info};
 
@@ -18,7 +19,9 @@ struct Claims {
     exp: usize,   // Expiration time as a UNIX timestamp
 }
 
-const SECRET_KEY: &str = "your_secret_key_here";
+fn get_secret_key() -> Result<String, env::VarError> {
+    env::var("JWT_SECRET_KEY")
+}
 
 pub fn generate_token(
     node_id: &str,
@@ -32,10 +35,11 @@ pub fn generate_token(
         exp: expiration.timestamp() as usize,
     };
 
+    let secret_key = get_secret_key()?;
     let token = encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(SECRET_KEY.as_ref()),
+        &EncodingKey::from_secret(secret_key.as_ref()),
     )?;
     info!(
         "Generated token for node_id: {} with role: {}",
@@ -45,9 +49,10 @@ pub fn generate_token(
 }
 
 pub fn verify_token(token: &str) -> Result<TokenData<Claims>, Box<dyn Error>> {
+    let secret_key = get_secret_key()?;
     let token_data = decode::<Claims>(
         token,
-        &DecodingKey::from_secret(SECRET_KEY.as_ref()),
+        &DecodingKey::from_secret(secret_key.as_ref()),
         &Validation::default(),
     )?;
     info!(
@@ -110,6 +115,7 @@ mod tests {
 
     #[test]
     fn test_generate_and_verify_token() {
+        std::env::set_var("JWT_SECRET_KEY", "test_secret_key");
         let node_id = "test_node";
         let role = "teacher";
         let token = generate_token(node_id, role, 60).unwrap();
