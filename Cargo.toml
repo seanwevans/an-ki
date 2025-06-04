@@ -16,13 +16,17 @@ lapin = "2.0"
 
 # Web framework for REST API
 warp = "0.3"
+tokio-postgres = "0.7"
+futures-util = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.21"
 
 # JSON serialization/deserialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # UUID for unique identifiers
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 
 # Prometheus metrics collection
 prometheus = "0.13"
@@ -58,7 +62,7 @@ tokio = { version = "1", features = ["full"] }
 warp = "0.3"
 
 [features]
-default = []
+default = ["full"]
 full = []
 
 # Enable optional features for specific use cases

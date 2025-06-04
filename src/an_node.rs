@@ -57,7 +57,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     while let Some(result) = consumer.next().await {
         match result {
-            Ok((_, delivery)) => {
+            Ok(delivery) => {
                 match serde_json::from_slice::<TaskMessage>(&delivery.data) {
                     Ok(task_message) => {
                         info!("Received task: {:?}", task_message);

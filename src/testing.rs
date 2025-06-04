@@ -1,7 +1,7 @@
 // testing.rs: Implements integration tests for the distributed neural network system.
 
-use crate::task_recovery_module::{TaskRecoveryManager, Task};
-use crate::api_module::Api;
+use crate::task_recovery::{TaskRecoveryManager, Task};
+use crate::api::Api;
 use std::sync::Arc;
 use uuid::Uuid;
 use warp::http::StatusCode;

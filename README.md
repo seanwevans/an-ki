@@ -104,13 +104,22 @@ Start a single-node CockroachDB cluster (for local development):
 cockroach start-single-node --insecure --listen-addr=localhost
 ```
 
+Set the connection string for the application. The project uses
+`tokio-postgres` to connect to CockroachDB, so provide a standard
+PostgreSQL URL:
+
+```bash
+export DATABASE_URL="postgresql://root@localhost:26257/defaultdb?sslmode=disable"
+```
+
 4. **Configure the project:**
    Create a `config/` directory and add configuration files. You can start by copying the example configuration:
    ```bash
    mkdir -p config
-   cp config/default.example config/default.toml
-   ```
-   Set up your environment variables or update the configuration files for your local setup.
+  cp config/default.example config/default.toml
+  ```
+  Set up your environment variables or update the configuration files for your local setup.
+   The JWT secret key must be provided via the `JWT_SECRET_KEY` environment variable.
 
 5. **Build the project:**
    Compile the project to ensure there are no issues.
