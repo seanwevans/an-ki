@@ -40,9 +40,6 @@ config = "0.11"
 
 # Regex for validation
 regex = "1"
-futures-util = "0.3"
-chrono = "0.4"
-base64 = "0.21"
 
 # HMAC and JWT for security
 jsonwebtoken = "8.1"
@@ -52,7 +49,6 @@ aes-gcm = "0.10"
 rand = "0.8"
 
 # Base64 encoding/decoding
-base64 = "0.21"
 
 # Testing framework for lazy static initialization
 lazy_static = "1.4"
