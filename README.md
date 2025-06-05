@@ -90,12 +90,8 @@ Inter-node communication is facilitated via RabbitMQ, and tasks are scheduled us
 Set up CockroachDB: If CockroachDB is not already installed, follow these steps:
 
 On macOS (using Homebrew):
-bash
-Copy code
 brew install cockroachdb/tap/cockroach
 On Ubuntu/Debian:
-bash
-Copy code
 sudo apt-get install -y cockroachdb
 On Windows: Follow the official installation guide.
 Start a single-node CockroachDB cluster (for local development):
@@ -135,9 +131,9 @@ export DATABASE_URL="postgresql://root@localhost:26257/defaultdb?sslmode=disable
 
 Now you're ready to start running the nodes as described in the [Usage](#usage) section.
 
-Usage
+## Usage
 
-Running the Nodes
+### Running the Nodes
 
 To run the different nodes, follow the steps below. Each type of node should be run in a separate terminal session to simulate a distributed system.
 
@@ -158,7 +154,7 @@ cargo run -- ki
 
 Make sure all nodes are running simultaneously to ensure proper communication and task assignment.
 
-API Endpoints
+### API Endpoints
 
 The system provides a REST API for managing tasks, available via the Warp web server. Below are the available endpoints:
 
