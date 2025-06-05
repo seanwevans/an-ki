@@ -3,16 +3,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
-use chrono::{Utc, DateTime};
+use chrono::Utc;
 use tracing::{info, error};
-use std::error::Error;
+use crate::common::NodeInfo;
 
-#[derive(Clone, Debug)]
-pub struct NodeInfo {
-    pub node_id: Uuid,
-    pub last_seen: DateTime<Utc>,
-    pub role: String,
-}
 
 #[derive(Clone)]
 pub struct NodeRegistry {
@@ -28,8 +22,9 @@ impl NodeRegistry {
 
     pub fn register_node(&self, node_id: Uuid, role: String) {
         let node_info = NodeInfo {
-            node_id,
-            last_seen: Utc::now(),
+            id: node_id,
+            address: None,
+            last_seen: Some(Utc::now()),
             role,
         };
         self.nodes.write().unwrap().insert(node_id, node_info.clone());
@@ -39,7 +34,7 @@ impl NodeRegistry {
     pub fn update_last_seen(&self, node_id: &Uuid) {
         let mut nodes = self.nodes.write().unwrap();
         if let Some(node_info) = nodes.get_mut(node_id) {
-            node_info.last_seen = Utc::now();
+            node_info.last_seen = Some(Utc::now());
             info!("Updated last seen for node: {}", node_id);
         } else {
             error!("Attempted to update non-existent node: {}", node_id);
