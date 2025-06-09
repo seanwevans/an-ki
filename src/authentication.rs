@@ -1,8 +1,9 @@
 // authentication.rs: Handles authentication and authorization using JWT tokens for role-based access control.
 
-use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey, TokenData};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, TokenData, Validation};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
+use std::env;
 use tracing::{info, error};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -12,7 +13,9 @@ struct Claims {
     exp: usize,   // Expiration time as a UNIX timestamp
 }
 
-const SECRET_KEY: &str = env!("JWT_SECRET_KEY");
+fn get_secret_key() -> Result<String, env::VarError> {
+    env::var("JWT_SECRET_KEY")
+}
 
 pub fn generate_token(node_id: &str, role: &str, expiration: usize) -> Result<String, Box<dyn Error>> {
     let claims = Claims {
@@ -21,7 +24,8 @@ pub fn generate_token(node_id: &str, role: &str, expiration: usize) -> Result<St
         exp: expiration,
     };
 
-    let encoding_key = EncodingKey::from_secret(SECRET_KEY.as_ref());
+    let secret_key = get_secret_key()?;
+    let encoding_key = EncodingKey::from_secret(secret_key.as_ref());
     let mut retries = 3;
     let mut token_result;
     loop {
@@ -38,7 +42,8 @@ pub fn generate_token(node_id: &str, role: &str, expiration: usize) -> Result<St
 }
 
 pub fn verify_token(token: &str) -> Result<TokenData<Claims>, Box<dyn Error>> {
-    let decoding_key = DecodingKey::from_secret(SECRET_KEY.as_ref());
+    let secret_key = get_secret_key()?;
+    let decoding_key = DecodingKey::from_secret(secret_key.as_ref());
     let mut retries = 3;
     let mut token_data_result;
     loop {
@@ -58,7 +63,8 @@ pub fn renew_token(token: &str, new_expiration: usize) -> Result<String, Box<dyn
     let mut token_data = verify_token(token)?.claims;
     token_data.exp = new_expiration;
 
-    let new_token = encode(&Header::default(), &token_data, &EncodingKey::from_secret(SECRET_KEY.as_ref()))?;
+    let secret_key = get_secret_key()?;
+    let new_token = encode(&Header::default(), &token_data, &EncodingKey::from_secret(secret_key.as_ref()))?;
     info!("Renewed token for node_id: {} with new expiration: {}", token_data.sub, new_expiration);
     Ok(new_token)
 }
