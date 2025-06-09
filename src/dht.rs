@@ -4,15 +4,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 use tracing::{info, error};
-use serde::{Deserialize, Serialize};
 use crate::database::Database;
+use crate::common::NodeInfo;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct NodeInfo {
-    id: Uuid,
-    address: String,
-    role: String,
-}
 
 #[derive(Clone)]
 pub struct DHT {
