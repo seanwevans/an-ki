@@ -65,7 +65,7 @@ pub fn load_dht_from_db(db: &Database) -> Result<DHT, Box<dyn std::error::Error>
     let mut dht = DHT::new();
     let rows = db.query("SELECT node_id, node_info FROM dht", &[])?;
     for row in rows {
-        let node_id: String = row.get(0);
+        let _node_id: String = row.get(0);
         let node_info_str: String = row.get(1);
         let node_info: NodeInfo = serde_json::from_str(&node_info_str)?;
         dht.add_node(node_info);
