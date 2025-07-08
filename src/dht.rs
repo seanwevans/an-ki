@@ -47,23 +47,22 @@ impl DHT {
 }
 
 // Store DHT in the database
-pub fn store_dht_in_db(dht: &DHT, db: &Database) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn store_dht_in_db(dht: &DHT, db: &Database) -> Result<(), Box<dyn std::error::Error>> {
     let nodes = dht.list_nodes();
     for node in nodes {
-        // Serialize NodeInfo and store it in the CockroachDB
         let node_id_str = node.id.to_string();
         let serialized_node = serde_json::to_string(&node)?;
         db.execute(
             "INSERT INTO dht (node_id, node_info) VALUES ($1, $2) ON CONFLICT (node_id) DO UPDATE SET node_info = $2",
             &[&node_id_str, &serialized_node],
-        )?;
+        ).await?;
     }
     Ok(())
 }
 
-pub fn load_dht_from_db(db: &Database) -> Result<DHT, Box<dyn std::error::Error>> {
+pub async fn load_dht_from_db(db: &Database) -> Result<DHT, Box<dyn std::error::Error>> {
     let mut dht = DHT::new();
-    let rows = db.query("SELECT node_id, node_info FROM dht", &[])?;
+    let rows = db.query("SELECT node_id, node_info FROM dht", &[]).await?;
     for row in rows {
         let node_id: String = row.get(0);
         let node_info_str: String = row.get(1);

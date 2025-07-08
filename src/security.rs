@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 use std::error::Error;
 use tracing::{error, info};
+use std::env;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -76,7 +77,9 @@ pub fn encrypt_message(message: &str, key: &str) -> Result<String, Box<dyn Error
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     // Encrypt the message
-    let ciphertext = cipher.encrypt(nonce, message.as_bytes())?;
+    let ciphertext = cipher
+        .encrypt(nonce, message.as_bytes())
+        .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
 
     // Prepend the nonce to the ciphertext so it can be used for decryption
     let mut combined = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
@@ -104,7 +107,9 @@ pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, Box<d
     let (nonce_bytes, ciphertext) = decoded_bytes.split_at(12);
     let nonce = Nonce::from_slice(nonce_bytes);
 
-    let plaintext = cipher.decrypt(nonce, ciphertext)?;
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
     let decrypted_message = String::from_utf8(plaintext)?;
     Ok(decrypted_message)
 }

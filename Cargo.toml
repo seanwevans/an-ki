@@ -20,6 +20,8 @@ tokio-postgres = "0.7"
 futures-util = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 base64 = "0.21"
+bb8 = "0.9"
+bb8-postgres = "0.9"
 
 # JSON serialization/deserialization
 serde = { version = "1.0", features = ["derive"] }
