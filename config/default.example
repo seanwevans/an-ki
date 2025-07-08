@@ -1,0 +1,6 @@
+# Example configuration for the distributed neural network system
+# Copy this file to `config/default.toml` and adjust values as needed
+
+amqp_addr = "amqp://127.0.0.1:5672/%2f"
+jwt_secret_key = "<JWT_SECRET_KEY>"
+database_url = "postgresql://root@localhost:26257/defaultdb?sslmode=disable"

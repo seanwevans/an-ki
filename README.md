@@ -109,13 +109,13 @@ export DATABASE_URL="postgresql://root@localhost:26257/defaultdb?sslmode=disable
 ```
 
 4. **Configure the project:**
-   Create a `config/` directory and add configuration files. You can start by copying the example configuration:
+   Create a `config/` directory and add configuration files. Start by copying the provided example configuration:
    ```bash
    mkdir -p config
-  cp config/default.example config/default.toml
-  ```
-  Set up your environment variables or update the configuration files for your local setup.
-   The JWT secret key must be provided via the `JWT_SECRET_KEY` environment variable.
+   cp config/default.example config/default.toml
+   ```
+   Edit `config/default.toml` to set values for `amqp_addr`, `jwt_secret_key`, and `database_url`.
+   You can also supply the JWT secret via the `JWT_SECRET_KEY` environment variable if preferred.
 
 5. **Build the project:**
    Compile the project to ensure there are no issues.
