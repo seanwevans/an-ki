@@ -141,8 +141,8 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./target/release/your_binary_name
-        asset_name: your_binary_name-${{ runner.os }}
+        asset_path: ./target/release/distributed_neural_network
+        asset_name: distributed_neural_network-${{ runner.os }}
         asset_content_type: application/octet-stream
 
   docker:
@@ -163,8 +163,8 @@ jobs:
       with:
         push: true
         tags: |
-          yourusername/yourrepo:latest
-          yourusername/yourrepo:${{ github.sha }}
+          seanwevans/an-ki:latest
+          seanwevans/an-ki:${{ github.sha }}
 
   docs:
     runs-on: ubuntu-latest
