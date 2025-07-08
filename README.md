@@ -38,7 +38,6 @@ The system is composed of three main types of nodes:
 
 Inter-node communication is facilitated via RabbitMQ, and tasks are scheduled using a load balancer to optimize resource utilization.
 
-![Architecture Diagram](architecture_diagram.png)
 
 ## Getting Started
 
