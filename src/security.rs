@@ -8,9 +8,10 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, TokenData, 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::{error, info};
+
 use std::env;
 use std::error::Error;
+use tracing::{error, info};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {

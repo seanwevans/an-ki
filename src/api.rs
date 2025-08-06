@@ -1,11 +1,11 @@
 // api.rs: Implements REST API endpoints for interacting with the task recovery system.
 
-use warp::Filter;
+use crate::task_recovery::{Task, TaskRecoveryManager};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::task_recovery::{TaskRecoveryManager, Task};
 use uuid::Uuid;
 use warp::http::StatusCode;
+use warp::Filter;
 
 #[derive(Clone)]
 pub struct Api {
@@ -17,24 +17,26 @@ impl Api {
         Api { task_manager }
     }
 
-    pub fn filters(self) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
+    pub fn filters(
+        &self,
+    ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
         let api = warp::path("tasks").and(warp::path::end());
 
         let get_task = warp::get()
             .and(api.clone())
-            .and(with_task_manager(self.task_manager.clone()))
+            .and(with_task_manager(Arc::clone(&self.task_manager)))
             .and(warp::query::<GetTaskParams>())
             .and_then(get_task_handler);
 
         let add_task = warp::post()
             .and(api.clone())
-            .and(with_task_manager(self.task_manager.clone()))
+            .and(with_task_manager(Arc::clone(&self.task_manager)))
             .and(warp::body::json())
             .and_then(add_task_handler);
 
         let delete_task = warp::delete()
             .and(api)
-            .and(with_task_manager(self.task_manager.clone()))
+            .and(with_task_manager(Arc::clone(&self.task_manager)))
             .and(warp::query::<DeleteTaskParams>())
             .and_then(delete_task_handler);
 
@@ -64,7 +66,12 @@ async fn get_task_handler(
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let task_id = match Uuid::parse_str(&params.task_id) {
         Ok(uuid) => uuid,
-        Err(_) => return Ok(warp::reply::with_status("Invalid UUID".to_string(), StatusCode::BAD_REQUEST)),
+        Err(_) => {
+            return Ok(warp::reply::with_status(
+                "Invalid UUID".to_string(),
+                StatusCode::BAD_REQUEST,
+            ))
+        }
     };
 
     let tasks = task_manager.tasks.read().await;
@@ -72,7 +79,10 @@ async fn get_task_handler(
         let body = serde_json::to_string(task).unwrap_or_default();
         Ok(warp::reply::with_status(body, StatusCode::OK))
     } else {
-        Ok(warp::reply::with_status("Task not found".to_string(), StatusCode::NOT_FOUND))
+        Ok(warp::reply::with_status(
+            "Task not found".to_string(),
+            StatusCode::NOT_FOUND,
+        ))
     }
 }
 
@@ -90,7 +100,12 @@ async fn delete_task_handler(
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let task_id = match Uuid::parse_str(&params.task_id) {
         Ok(uuid) => uuid,
-        Err(_) => return Ok(warp::reply::with_status("Invalid UUID", StatusCode::BAD_REQUEST)),
+        Err(_) => {
+            return Ok(warp::reply::with_status(
+                "Invalid UUID",
+                StatusCode::BAD_REQUEST,
+            ))
+        }
     };
 
     task_manager.remove_task(&task_id).await;
