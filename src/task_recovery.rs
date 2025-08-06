@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock;
 use tracing::{error, info};
 use uuid::Uuid;
