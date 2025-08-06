@@ -1,7 +1,8 @@
 // load_balancer.rs: Implements load balancing for An nodes to effectively distribute tasks.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 use tokio::sync::broadcast;
 use tracing::{info, error};
@@ -25,14 +26,14 @@ impl LoadBalancer {
         }
     }
 
-    pub fn add_node(&self, node_id: Uuid) {
-        let mut nodes = self.nodes.write().unwrap();
+    pub async fn add_node(&self, node_id: Uuid) {
+        let mut nodes = self.nodes.write().await;
         nodes.insert(node_id, NodeLoadInfo { node_id, task_count: 0 });
         info!("Added node to load balancer: {}", node_id);
     }
 
-    pub fn remove_node(&self, node_id: &Uuid) {
-        let mut nodes = self.nodes.write().unwrap();
+    pub async fn remove_node(&self, node_id: &Uuid) {
+        let mut nodes = self.nodes.write().await;
         if nodes.remove(node_id).is_some() {
             info!("Removed node from load balancer: {}", node_id);
         } else {
@@ -40,8 +41,8 @@ impl LoadBalancer {
         }
     }
 
-    pub fn assign_task(&self) -> Option<Uuid> {
-        let mut nodes = self.nodes.write().unwrap();
+    pub async fn assign_task(&self) -> Option<Uuid> {
+        let mut nodes = self.nodes.write().await;
         if nodes.is_empty() {
             error!("No nodes available to assign task.");
             return None;
@@ -57,8 +58,8 @@ impl LoadBalancer {
         }
     }
 
-    pub fn complete_task(&self, node_id: &Uuid) {
-        let mut nodes = self.nodes.write().unwrap();
+    pub async fn complete_task(&self, node_id: &Uuid) {
+        let mut nodes = self.nodes.write().await;
         if let Some(node_info) = nodes.get_mut(node_id) {
             if node_info.task_count > 0 {
                 node_info.task_count -= 1;
@@ -69,15 +70,15 @@ impl LoadBalancer {
         }
     }
 
-    pub fn random_node(&self) -> Option<Uuid> {
-        let nodes = self.nodes.read().unwrap();
+    pub async fn random_node(&self) -> Option<Uuid> {
+        let nodes = self.nodes.read().await;
         nodes.keys().cloned().choose(&mut rand::thread_rng())
     }
 }
 
 pub async fn monitor_node_load(mut rx: broadcast::Receiver<NodeLoadInfo>, load_balancer: LoadBalancer) {
     while let Ok(node_load) = rx.recv().await {
-        let mut nodes = load_balancer.nodes.write().unwrap();
+        let mut nodes = load_balancer.nodes.write().await;
         if let Some(node_info) = nodes.get_mut(&node_load.node_id) {
             node_info.task_count = node_load.task_count;
             info!("Updated load info for node: {}. Task count: {}", node_load.node_id, node_load.task_count);

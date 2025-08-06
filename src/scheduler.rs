@@ -28,7 +28,7 @@ impl Scheduler {
     }
 
     pub async fn schedule_task(&self, task: Task) -> Result<(), Box<dyn Error>> {
-        if let Some(node_id) = self.load_balancer.assign_task() {
+        if let Some(node_id) = self.load_balancer.assign_task().await {
             info!("Scheduling task {} to node {}", task.task_id, node_id);
             self.task_tx.send(task).await?;
             Ok(())
@@ -67,7 +67,7 @@ mod tests {
         let (task_tx, mut task_rx) = mpsc::channel(10);
         let scheduler = Scheduler::new(load_balancer.clone(), task_tx);
 
-        load_balancer.add_node(Uuid::new_v4());
+        load_balancer.add_node(Uuid::new_v4()).await;
         let task = Task {
             task_id: Uuid::new_v4(),
             data: "Test data".to_string(),
