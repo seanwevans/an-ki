@@ -13,6 +13,7 @@ use tracing::{error, info};
 use std::env;
 use std::error::Error;
 
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sub: String,  // Subject (usually the node ID)
