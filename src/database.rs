@@ -1,7 +1,7 @@
-use tokio_postgres::{NoTls, Row, Error};
-use tokio_postgres::types::ToSql;
-use bb8::{Pool};
+use bb8::Pool;
 use bb8_postgres::PostgresConnectionManager;
+use tokio_postgres::types::ToSql;
+use tokio_postgres::{NoTls, Row};
 
 pub struct Database {
     pool: Pool<PostgresConnectionManager<NoTls>>,
@@ -15,14 +15,30 @@ impl Database {
         Ok(Database { pool })
     }
 
-    pub async fn execute(&self, query: &str, params: &[&(dyn ToSql + Sync)]) -> Result<u64, Box<dyn std::error::Error>> {
-        let conn = self.pool.get().await.map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
+    pub async fn execute(
+        &self,
+        query: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         let result = conn.execute(query, params).await?;
         Ok(result)
     }
 
-    pub async fn query(&self, query: &str, params: &[&(dyn ToSql + Sync)]) -> Result<Vec<Row>, Box<dyn std::error::Error>> {
-        let conn = self.pool.get().await.map_err(|e| Box::<dyn std::error::Error>::from(e.to_string()))?;
+    pub async fn query(
+        &self,
+        query: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Vec<Row>, Box<dyn std::error::Error>> {
+        let conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         let rows = conn.query(query, params).await?;
         Ok(rows)
     }
