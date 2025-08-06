@@ -9,10 +9,8 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{error, info};
-
 use std::env;
 use std::error::Error;
-
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {

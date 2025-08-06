@@ -19,13 +19,19 @@ async fn test_task_recovery_persistence() {
     };
 
     // Add task and persist to file
-    recovery_manager.add_task(task.clone());
-    recovery_manager.persist_tasks().unwrap();
+    recovery_manager.add_task(task.clone()).await;
+    recovery_manager.persist_tasks().await.unwrap();
 
     // Create a new recovery manager to test loading from the persisted file
     let new_recovery_manager = TaskRecoveryManager::new(storage_file);
-    new_recovery_manager.recover_tasks().unwrap();
-    assert!(new_recovery_manager.tasks.read().unwrap().contains_key(&task.task_id));
+    new_recovery_manager.recover_tasks().await.unwrap();
+    assert!(
+        new_recovery_manager
+            .tasks
+            .read()
+            .await
+            .contains_key(&task.task_id)
+    );
 
     // Clean up test file
     std::fs::remove_file(storage_file).unwrap();
@@ -73,7 +79,7 @@ async fn test_task_api_delete() {
         task_id: Uuid::new_v4(),
         data: "Delete test task data".to_string(),
     };
-    task_manager.add_task(task.clone());
+    task_manager.add_task(task.clone()).await;
 
     // Test deleting the task
     let res = request()
@@ -106,16 +112,22 @@ async fn test_recovery_after_crash() {
     };
 
     // Simulate adding a task and persisting before a crash
-    recovery_manager.add_task(task.clone());
-    recovery_manager.persist_tasks().unwrap();
+    recovery_manager.add_task(task.clone()).await;
+    recovery_manager.persist_tasks().await.unwrap();
 
     // Simulate a delay (representing downtime)
     sleep(Duration::from_secs(1)).await;
 
     // Recover tasks after "crash"
     let new_recovery_manager = TaskRecoveryManager::new(storage_file);
-    new_recovery_manager.recover_tasks().unwrap();
-    assert!(new_recovery_manager.tasks.read().unwrap().contains_key(&task.task_id));
+    new_recovery_manager.recover_tasks().await.unwrap();
+    assert!(
+        new_recovery_manager
+            .tasks
+            .read()
+            .await
+            .contains_key(&task.task_id)
+    );
 
     // Clean up test file
     std::fs::remove_file(storage_file).unwrap();

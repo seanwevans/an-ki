@@ -3,8 +3,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::sync::{Arc, RwLock};
+use tokio::sync::RwLock;
 use tracing::{error, info};
 use uuid::Uuid;
 use std::error::Error;
@@ -29,20 +30,20 @@ impl TaskRecoveryManager {
         }
     }
 
-    pub fn add_task(&self, task: Task) {
-        let mut tasks = self.tasks.write().unwrap();
+    pub async fn add_task(&self, task: Task) {
+        let mut tasks = self.tasks.write().await;
         tasks.insert(task.task_id, task.clone());
         info!("Added task to recovery manager: {:?}", task);
-        if let Err(e) = self.persist_tasks() {
+        if let Err(e) = self.persist_tasks().await {
             error!("Failed to persist tasks: {:?}", e);
         }
     }
 
-    pub fn remove_task(&self, task_id: &Uuid) {
-        let mut tasks = self.tasks.write().unwrap();
+    pub async fn remove_task(&self, task_id: &Uuid) {
+        let mut tasks = self.tasks.write().await;
         if tasks.remove(task_id).is_some() {
             info!("Removed task from recovery manager: {}", task_id);
-            if let Err(e) = self.persist_tasks() {
+            if let Err(e) = self.persist_tasks().await {
                 error!("Failed to persist tasks: {:?}", e);
             }
         } else {
@@ -50,27 +51,24 @@ impl TaskRecoveryManager {
         }
     }
 
-    pub fn recover_tasks(&self) -> Result<(), Box<dyn Error>> {
+    pub async fn recover_tasks(&self) -> Result<(), Box<dyn Error>> {
         let mut file = OpenOptions::new().read(true).open(&self.storage_file)?;
         let mut content = String::new();
         file.read_to_string(&mut content)?;
 
         if !content.is_empty() {
             let recovered_tasks: HashMap<Uuid, Task> = serde_json::from_str(&content)?;
-            let mut tasks = self.tasks.write().unwrap();
+            let mut tasks = self.tasks.write().await;
             *tasks = recovered_tasks;
             info!("Recovered tasks from storage file.");
         }
         Ok(())
     }
 
-    fn persist_tasks(&self) -> Result<(), Box<dyn Error>> {
-        let tasks = self.tasks.read().unwrap();
-        let content = serde_json::to_string(&*tasks).map_err(|e| Box::<dyn Error>::from(e))?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .open(&self.storage_file)?;
+    async fn persist_tasks(&self) -> Result<(), io::Error> {
+        let tasks = self.tasks.read().await;
+        let content = serde_json::to_string(&*tasks)?;
+        let mut file = OpenOptions::new().write(true).truncate(true).open(&self.storage_file)?;
         file.write_all(content.as_bytes())?;
         Ok(())
     }
@@ -81,8 +79,8 @@ mod tests {
     use super::*;
     use std::fs;
 
-    #[test]
-    fn test_task_recovery() {
+    #[tokio::test]
+    async fn test_task_recovery() {
         let storage_file = "test_tasks.json";
         let recovery_manager = TaskRecoveryManager::new(storage_file);
 
@@ -91,15 +89,15 @@ mod tests {
             data: "Test data".to_string(),
         };
 
-        recovery_manager.add_task(task.clone());
-        recovery_manager.remove_task(&task.task_id);
+        recovery_manager.add_task(task.clone()).await;
+        recovery_manager.remove_task(&task.task_id).await;
 
         // Recover tasks from file
-        recovery_manager.add_task(task.clone());
-        recovery_manager.persist_tasks().unwrap();
+        recovery_manager.add_task(task.clone()).await;
+        recovery_manager.persist_tasks().await.unwrap();
         let new_recovery_manager = TaskRecoveryManager::new(storage_file);
-        new_recovery_manager.recover_tasks().unwrap();
-        assert!(new_recovery_manager.tasks.read().unwrap().contains_key(&task.task_id));
+        new_recovery_manager.recover_tasks().await.unwrap();
+        assert!(new_recovery_manager.tasks.read().await.contains_key(&task.task_id));
 
         // Clean up test file
         fs::remove_file(storage_file).unwrap();
