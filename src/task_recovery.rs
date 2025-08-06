@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 use std::sync::{Arc, RwLock};
 use tracing::{error, info};
 use uuid::Uuid;
@@ -64,10 +64,13 @@ impl TaskRecoveryManager {
         Ok(())
     }
 
-    fn persist_tasks(&self) -> Result<(), io::Error> {
+    fn persist_tasks(&self) -> Result<(), Box<dyn Error>> {
         let tasks = self.tasks.read().unwrap();
-        let content = serde_json::to_string(&*tasks)?;
-        let mut file = OpenOptions::new().write(true).truncate(true).open(&self.storage_file)?;
+        let content = serde_json::to_string(&*tasks).map_err(|e| Box::<dyn Error>::from(e))?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&self.storage_file)?;
         file.write_all(content.as_bytes())?;
         Ok(())
     }
