@@ -74,7 +74,7 @@ async fn get_task_handler(
         }
     };
 
-    let tasks = task_manager.tasks.read().unwrap();
+    let tasks = task_manager.tasks.read().await;
     if let Some(task) = tasks.get(&task_id) {
         let body = serde_json::to_string(task).unwrap_or_default();
         Ok(warp::reply::with_status(body, StatusCode::OK))
@@ -90,7 +90,7 @@ async fn add_task_handler(
     task_manager: Arc<TaskRecoveryManager>,
     new_task: Task,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    task_manager.add_task(new_task);
+    task_manager.add_task(new_task).await;
     Ok(warp::reply::with_status("Task added", StatusCode::CREATED))
 }
 
@@ -108,7 +108,7 @@ async fn delete_task_handler(
         }
     };
 
-    task_manager.remove_task(&task_id);
+    task_manager.remove_task(&task_id).await;
     Ok(warp::reply::with_status("Task deleted", StatusCode::OK))
 }
 
@@ -147,7 +147,7 @@ mod tests {
             task_id: Uuid::new_v4(),
             data: "Test task data".to_string(),
         };
-        task_manager.add_task(task.clone());
+        task_manager.add_task(task.clone()).await;
 
         let res = request()
             .method("GET")
@@ -167,7 +167,7 @@ mod tests {
             task_id: Uuid::new_v4(),
             data: "Test task data".to_string(),
         };
-        task_manager.add_task(task.clone());
+        task_manager.add_task(task.clone()).await;
 
         let res = request()
             .method("DELETE")
