@@ -1,7 +1,8 @@
 // dht.rs: Implements a distributed hash table (DHT) for node discovery and coordination.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 use tracing::{info, error};
 use crate::database::Database;
@@ -20,14 +21,14 @@ impl DHT {
         }
     }
 
-    pub fn add_node(&self, node_info: NodeInfo) {
-        let mut nodes = self.nodes.write().unwrap();
+    pub async fn add_node(&self, node_info: NodeInfo) {
+        let mut nodes = self.nodes.write().await;
         nodes.insert(node_info.id, node_info.clone());
         info!("Added node to DHT: {:?}", node_info);
     }
 
-    pub fn remove_node(&self, node_id: &Uuid) {
-        let mut nodes = self.nodes.write().unwrap();
+    pub async fn remove_node(&self, node_id: &Uuid) {
+        let mut nodes = self.nodes.write().await;
         if nodes.remove(node_id).is_some() {
             info!("Removed node from DHT: {:?}", node_id);
         } else {
@@ -35,20 +36,20 @@ impl DHT {
         }
     }
 
-    pub fn get_node(&self, node_id: &Uuid) -> Option<NodeInfo> {
-        let nodes = self.nodes.read().unwrap();
+    pub async fn get_node(&self, node_id: &Uuid) -> Option<NodeInfo> {
+        let nodes = self.nodes.read().await;
         nodes.get(node_id).cloned()
     }
 
-    pub fn list_nodes(&self) -> Vec<NodeInfo> {
-        let nodes = self.nodes.read().unwrap();
+    pub async fn list_nodes(&self) -> Vec<NodeInfo> {
+        let nodes = self.nodes.read().await;
         nodes.values().cloned().collect()
     }
 }
 
 // Store DHT in the database
 pub async fn store_dht_in_db(dht: &DHT, db: &Database) -> Result<(), Box<dyn std::error::Error>> {
-    let nodes = dht.list_nodes();
+    let nodes = dht.list_nodes().await;
     for node in nodes {
         let node_id_str = node.id.to_string();
         let serialized_node = serde_json::to_string(&node)?;
@@ -61,13 +62,13 @@ pub async fn store_dht_in_db(dht: &DHT, db: &Database) -> Result<(), Box<dyn std
 }
 
 pub async fn load_dht_from_db(db: &Database) -> Result<DHT, Box<dyn std::error::Error>> {
-    let mut dht = DHT::new();
+    let dht = DHT::new();
     let rows = db.query("SELECT node_id, node_info FROM dht", &[]).await?;
     for row in rows {
         let _node_id: String = row.get(0);
         let node_info_str: String = row.get(1);
         let node_info: NodeInfo = serde_json::from_str(&node_info_str)?;
-        dht.add_node(node_info);
+        dht.add_node(node_info).await;
     }
     Ok(dht)
 }
