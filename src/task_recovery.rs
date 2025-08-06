@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock;
@@ -51,8 +51,19 @@ impl TaskRecoveryManager {
         }
     }
 
-    pub async fn recover_tasks(&self) -> Result<(), Box<dyn Error>> {
-        let mut file = OpenOptions::new().read(true).open(&self.storage_file)?;
+    pub fn recover_tasks(&self) -> Result<(), Box<dyn Error>> {
+        let mut file = match OpenOptions::new().read(true).open(&self.storage_file) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .open(&self.storage_file)?;
+                return Ok(());
+            }
+            Err(e) => return Err(Box::new(e)),
+        };
+
         let mut content = String::new();
         file.read_to_string(&mut content)?;
 
@@ -68,7 +79,11 @@ impl TaskRecoveryManager {
     async fn persist_tasks(&self) -> Result<(), io::Error> {
         let tasks = self.tasks.read().await;
         let content = serde_json::to_string(&*tasks)?;
-        let mut file = OpenOptions::new().write(true).truncate(true).open(&self.storage_file)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&self.storage_file)?;
         file.write_all(content.as_bytes())?;
         Ok(())
     }
@@ -100,6 +115,19 @@ mod tests {
         assert!(new_recovery_manager.tasks.read().await.contains_key(&task.task_id));
 
         // Clean up test file
+        fs::remove_file(storage_file).unwrap();
+    }
+
+    #[test]
+    fn test_recover_tasks_file_absent() {
+        let storage_file = "missing_tasks.json";
+        if fs::metadata(storage_file).is_ok() {
+            fs::remove_file(storage_file).unwrap();
+        }
+        let recovery_manager = TaskRecoveryManager::new(storage_file);
+        assert!(recovery_manager.recover_tasks().is_ok());
+        assert!(fs::metadata(storage_file).is_ok());
+        assert!(recovery_manager.tasks.read().unwrap().is_empty());
         fs::remove_file(storage_file).unwrap();
     }
 }
