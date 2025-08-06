@@ -12,7 +12,6 @@ use sha2::{Digest, Sha256};
 use std::error::Error;
 use std::env;
 use tracing::{error, info};
-use std::env;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
