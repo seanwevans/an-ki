@@ -63,6 +63,11 @@ pub fn verify_token(token: &str) -> Result<TokenData<Claims>, Box<dyn Error>> {
     Ok(token_data)
 }
 
+pub fn renew_token(token: &str, expiration_minutes: i64) -> Result<String, Box<dyn Error>> {
+    let token_data = verify_token(token)?;
+    generate_token(&token_data.claims.sub, &token_data.claims.role, expiration_minutes)
+}
+
 pub fn encrypt_message(message: &str, key: &str) -> Result<String, Box<dyn Error>> {
     // Derive a 256-bit key from the provided key string using SHA-256
     let mut hasher = Sha256::new();
