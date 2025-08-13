@@ -1,18 +1,13 @@
 // scheduler.rs: Implements a task scheduler that assigns tasks to Ki nodes based on load and capacity.
 
 use crate::load_balancer::LoadBalancer;
+use crate::common::Task;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use tracing::{info, error};
 use std::time::Duration;
 use tokio::time;
 use std::error::Error;
-
-#[derive(Clone, Debug)]
-pub struct Task {
-    pub task_id: Uuid,
-    pub data: String,
-}
 
 pub struct Scheduler {
     load_balancer: LoadBalancer,

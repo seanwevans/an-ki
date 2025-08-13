@@ -1,20 +1,14 @@
 // task_recovery.rs: Implements task persistence and recovery for robustness.
 
-use serde::{Deserialize, Serialize};
+use crate::common::Task;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info};
 use uuid::Uuid;
 use std::error::Error;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Task {
-    pub task_id: Uuid,
-    pub data: String,
-}
 
 #[derive(Clone)]
 pub struct TaskRecoveryManager {
@@ -51,7 +45,7 @@ impl TaskRecoveryManager {
         }
     }
 
-    pub fn recover_tasks(&self) -> Result<(), Box<dyn Error>> {
+    pub async fn recover_tasks(&self) -> Result<(), Box<dyn Error>> {
         let mut file = match OpenOptions::new().read(true).open(&self.storage_file) {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
