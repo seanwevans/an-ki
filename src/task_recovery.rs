@@ -1,6 +1,6 @@
 // task_recovery.rs: Implements task persistence and recovery for robustness.
 
-use serde::{Deserialize, Serialize};
+use crate::common::Task;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::OpenOptions;
@@ -9,12 +9,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info};
 use uuid::Uuid;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Task {
-    pub task_id: Uuid,
-    pub data: String,
-}
 
 #[derive(Clone)]
 pub struct TaskRecoveryManager {

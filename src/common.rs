@@ -3,6 +3,12 @@ use serde::{Serialize, Deserialize};
 use chrono::{DateTime, Utc};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Task {
+    pub task_id: Uuid,
+    pub data: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeInfo {
     pub id: Uuid,
     pub address: Option<String>,
