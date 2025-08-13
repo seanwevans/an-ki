@@ -1,20 +1,14 @@
 // task_recovery.rs: Implements task persistence and recovery for robustness.
 
-use serde::{Deserialize, Serialize};
+use crate::common::Task;
 use std::collections::HashMap;
+use std::error::Error;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info};
 use uuid::Uuid;
-use std::error::Error;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Task {
-    pub task_id: Uuid,
-    pub data: String,
-}
 
 #[derive(Clone)]
 pub struct TaskRecoveryManager {
@@ -51,7 +45,7 @@ impl TaskRecoveryManager {
         }
     }
 
-    pub fn recover_tasks(&self) -> Result<(), Box<dyn Error>> {
+    pub async fn recover_tasks(&self) -> Result<(), Box<dyn Error>> {
         let mut file = match OpenOptions::new().read(true).open(&self.storage_file) {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -76,7 +70,7 @@ impl TaskRecoveryManager {
         Ok(())
     }
 
-    async fn persist_tasks(&self) -> Result<(), io::Error> {
+    async fn persist_tasks(&self) -> Result<(), Box<dyn Error>> {
         let tasks = self.tasks.read().await;
         let content = serde_json::to_string(&*tasks)?;
         let mut file = OpenOptions::new()
@@ -112,22 +106,26 @@ mod tests {
         recovery_manager.persist_tasks().await.unwrap();
         let new_recovery_manager = TaskRecoveryManager::new(storage_file);
         new_recovery_manager.recover_tasks().await.unwrap();
-        assert!(new_recovery_manager.tasks.read().await.contains_key(&task.task_id));
+        assert!(new_recovery_manager
+            .tasks
+            .read()
+            .await
+            .contains_key(&task.task_id));
 
         // Clean up test file
         fs::remove_file(storage_file).unwrap();
     }
 
-    #[test]
-    fn test_recover_tasks_file_absent() {
+    #[tokio::test]
+    async fn test_recover_tasks_file_absent() {
         let storage_file = "missing_tasks.json";
         if fs::metadata(storage_file).is_ok() {
             fs::remove_file(storage_file).unwrap();
         }
         let recovery_manager = TaskRecoveryManager::new(storage_file);
-        assert!(recovery_manager.recover_tasks().is_ok());
+        assert!(recovery_manager.recover_tasks().await.is_ok());
         assert!(fs::metadata(storage_file).is_ok());
-        assert!(recovery_manager.tasks.read().unwrap().is_empty());
+        assert!(recovery_manager.tasks.read().await.is_empty());
         fs::remove_file(storage_file).unwrap();
     }
 }

@@ -1,9 +1,11 @@
 // logging_metrics.rs: Implements logging and metrics collection for monitoring node health and performance.
 
-use tracing::{info, error, warn, debug, Level};
+use lazy_static::lazy_static;
+use prometheus::{register_counter, register_histogram, Counter, Encoder, Histogram, TextEncoder};
+use std::convert::Infallible;
+use std::time::{Duration, Instant};
+use tracing::{debug, error, info, warn, Level};
 use tracing_subscriber::{fmt, EnvFilter};
-use std::time::{Instant, Duration};
-use prometheus::{Encoder, TextEncoder, Counter, Histogram, register_counter, register_histogram};
 use warp::Filter;
 
 // Metrics definitions
@@ -11,11 +13,13 @@ lazy_static! {
     static ref TASKS_PROCESSED: Counter = register_counter!(
         "tasks_processed_total",
         "Total number of tasks processed by the nodes"
-    ).unwrap();
+    )
+    .unwrap();
     static ref PROCESSING_TIME: Histogram = register_histogram!(
         "task_processing_seconds",
         "Histogram of task processing times"
-    ).unwrap();
+    )
+    .unwrap();
 }
 
 pub fn init_logging() {
@@ -33,16 +37,20 @@ pub fn log_task_processing(start_time: Instant) {
     debug!("Task processed in {:?} seconds.", elapsed);
 }
 
-pub async fn metrics_endpoint() -> impl warp::Reply {
+pub async fn metrics_endpoint() -> Result<impl warp::Reply, Infallible> {
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();
     let mut buffer = Vec::new();
     encoder.encode(&metric_families, &mut buffer).unwrap();
-    warp::reply::with_header(buffer, "Content-Type", encoder.format_type())
+    Ok(warp::reply::with_header(
+        buffer,
+        "Content-Type",
+        encoder.format_type(),
+    ))
 }
 
 pub async fn run_metrics_server() {
-    let metrics_route = warp::path("metrics").map(metrics_endpoint);
+    let metrics_route = warp::path("metrics").and_then(metrics_endpoint);
     warp::serve(metrics_route).run(([127, 0, 0, 1], 9090)).await;
 }
 
@@ -59,7 +67,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics_endpoint() {
-        let response = metrics_endpoint().await;
+        let response = metrics_endpoint().await.unwrap();
         assert!(response.into_response().status().is_success());
     }
 

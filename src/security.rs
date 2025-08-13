@@ -14,10 +14,10 @@ use std::error::Error;
 use tracing::{error, info};
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Claims {
-    sub: String,  // Subject (usually the node ID)
-    role: String, // Role of the node (e.g., principal, teacher, ki)
-    exp: usize,   // Expiration time as a UNIX timestamp
+pub struct Claims {
+    pub sub: String,  // Subject (usually the node ID)
+    pub role: String, // Role of the node (e.g., principal, teacher, ki)
+    pub exp: usize,   // Expiration time as a UNIX timestamp
 }
 
 fn get_secret_key() -> Result<String, env::VarError> {
@@ -121,7 +121,9 @@ pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, Box<d
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        encrypt_message, decrypt_message, generate_token, verify_token, Claims,
+    };
 
     #[test]
     fn test_generate_and_verify_token() {
@@ -130,9 +132,10 @@ mod tests {
         let role = "teacher";
         let token = generate_token(node_id, role, 60).unwrap();
         let token_data = verify_token(&token).unwrap();
+        let Claims { sub, role: claim_role, .. } = token_data.claims;
 
-        assert_eq!(token_data.claims.sub, node_id);
-        assert_eq!(token_data.claims.role, role);
+        assert_eq!(sub, node_id);
+        assert_eq!(claim_role, role);
     }
 
     #[test]
