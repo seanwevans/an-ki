@@ -7,6 +7,7 @@ mod an_node;
 mod ki_node;
 mod principal;
 mod security; // Added security module
+mod authentication; // Re-exported token utilities
 mod node_registry; // Added node registry module
 mod backup; // Added backup module
 mod api; // Added API module

@@ -1,6 +1,6 @@
 // backup.rs: Implements a backup mechanism for task persistence to enhance robustness and redundancy.
 
-use serde::{Deserialize, Serialize};
+use crate::common::Task;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::sync::{Arc, RwLock};
@@ -10,12 +10,6 @@ use uuid::Uuid;
 use chrono::Utc;
 use std::error::Error;
 use std::path::Path;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Task {
-    pub task_id: Uuid,
-    pub data: String,
-}
 
 #[derive(Clone)]
 pub struct BackupManager {
