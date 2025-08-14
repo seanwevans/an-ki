@@ -60,7 +60,7 @@ async fn test_task_api_add_and_get() {
     // Test retrieving the added task
     let res = request()
         .method("GET")
-        .path(&format!("/tasks?task_id={}", new_task.task_id))
+        .path(&format!("/tasks/{}", new_task.task_id))
         .reply(&api.filters())
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -84,7 +84,7 @@ async fn test_task_api_delete() {
     // Test deleting the task
     let res = request()
         .method("DELETE")
-        .path(&format!("/tasks?task_id={}", task.task_id))
+        .path(&format!("/tasks/{}", task.task_id))
         .reply(&api.filters())
         .await;
     assert_eq!(res.status(), StatusCode::OK);
@@ -92,7 +92,7 @@ async fn test_task_api_delete() {
     // Verify the task is no longer available
     let res = request()
         .method("GET")
-        .path(&format!("/tasks?task_id={}", task.task_id))
+        .path(&format!("/tasks/{}", task.task_id))
         .reply(&api.filters())
         .await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
