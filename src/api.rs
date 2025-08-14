@@ -1,6 +1,6 @@
 // api.rs: Implements REST API endpoints for interacting with the task recovery system.
 
-use crate::task_recovery::TaskRecoveryManager;
+use crate::task_recovery::{Task, TaskRecoveryManager};
 use crate::common::Task;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -21,38 +21,25 @@ impl Api {
     pub fn filters(
         &self,
     ) -> impl Filter<Extract = impl warp::Reply, Error = warp::Rejection> + Clone {
-        let api = warp::path("tasks").and(warp::path::end());
-
-        let get_task = warp::get()
-            .and(api.clone())
-            .and(with_task_manager(Arc::clone(&self.task_manager)))
-            .and(warp::query::<GetTaskParams>())
-            .and_then(get_task_handler);
-
         let add_task = warp::post()
-            .and(api.clone())
+            .and(warp::path("tasks"))
+            .and(warp::path::end())
             .and(with_task_manager(Arc::clone(&self.task_manager)))
             .and(warp::body::json())
             .and_then(add_task_handler);
 
-        let delete_task = warp::delete()
-            .and(api)
+        let get_task = warp::get()
+            .and(warp::path!("tasks" / Uuid))
             .and(with_task_manager(Arc::clone(&self.task_manager)))
-            .and(warp::query::<DeleteTaskParams>())
+            .and_then(get_task_handler);
+
+        let delete_task = warp::delete()
+            .and(warp::path!("tasks" / Uuid))
+            .and(with_task_manager(Arc::clone(&self.task_manager)))
             .and_then(delete_task_handler);
 
-        get_task.or(add_task).or(delete_task)
+        add_task.or(get_task).or(delete_task)
     }
-}
-
-#[derive(Deserialize)]
-struct GetTaskParams {
-    task_id: String,
-}
-
-#[derive(Deserialize)]
-struct DeleteTaskParams {
-    task_id: String,
 }
 
 fn with_task_manager(
@@ -62,19 +49,9 @@ fn with_task_manager(
 }
 
 async fn get_task_handler(
+    task_id: Uuid,
     task_manager: Arc<TaskRecoveryManager>,
-    params: GetTaskParams,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let task_id = match Uuid::parse_str(&params.task_id) {
-        Ok(uuid) => uuid,
-        Err(_) => {
-            return Ok(warp::reply::with_status(
-                "Invalid UUID".to_string(),
-                StatusCode::BAD_REQUEST,
-            ))
-        }
-    };
-
     let tasks = task_manager.tasks.read().await;
     if let Some(task) = tasks.get(&task_id) {
         let body = serde_json::to_string(task).unwrap_or_default();
@@ -96,19 +73,9 @@ async fn add_task_handler(
 }
 
 async fn delete_task_handler(
+    task_id: Uuid,
     task_manager: Arc<TaskRecoveryManager>,
-    params: DeleteTaskParams,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let task_id = match Uuid::parse_str(&params.task_id) {
-        Ok(uuid) => uuid,
-        Err(_) => {
-            return Ok(warp::reply::with_status(
-                "Invalid UUID",
-                StatusCode::BAD_REQUEST,
-            ))
-        }
-    };
-
     task_manager.remove_task(&task_id).await;
     Ok(warp::reply::with_status("Task deleted", StatusCode::OK))
 }
@@ -152,7 +119,7 @@ mod tests {
 
         let res = request()
             .method("GET")
-            .path(&format!("/tasks?task_id={}", task.task_id))
+            .path(&format!("/tasks/{}", task.task_id))
             .reply(&api.filters())
             .await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -172,7 +139,7 @@ mod tests {
 
         let res = request()
             .method("DELETE")
-            .path(&format!("/tasks?task_id={}", task.task_id))
+            .path(&format!("/tasks/{}", task.task_id))
             .reply(&api.filters())
             .await;
         assert_eq!(res.status(), StatusCode::OK);

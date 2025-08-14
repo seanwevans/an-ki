@@ -157,9 +157,9 @@ Make sure all nodes are running simultaneously to ensure proper communication an
 
 The system provides a REST API for managing tasks, available via the Warp web server. Below are the available endpoints:
 
-GET /tasks: Retrieve a list of all tasks in the system.
+GET /tasks/{task_id}: Retrieve a specific task by providing its ID.
 
-curl http://localhost:3030/tasks
+curl http://localhost:3030/tasks/{task_id}
 
 POST /tasks: Add a new task to the system. Provide the task data in the request body.
 
