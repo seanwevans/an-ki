@@ -1,6 +1,6 @@
 // api.rs: Implements REST API endpoints for interacting with the task recovery system.
 
-use crate::task_recovery::{Task, TaskRecoveryManager};
+use crate::task_recovery::TaskRecoveryManager;
 use crate::common::Task;
 use serde::Deserialize;
 use std::sync::Arc;
