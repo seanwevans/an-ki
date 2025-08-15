@@ -2,7 +2,7 @@
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-use base64::{decode as base64_decode, encode as base64_encode};
+use base64::{engine::general_purpose, Engine as _};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, TokenData, Validation};
 use rand::RngCore;
@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use std::env;
 use std::error::Error;
-use tracing::{error, info};
+use tracing::info;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -91,11 +91,11 @@ pub fn encrypt_message(message: &str, key: &str) -> Result<String, Box<dyn Error
     combined.extend_from_slice(&nonce_bytes);
     combined.extend_from_slice(&ciphertext);
 
-    Ok(base64_encode(&combined))
+    Ok(general_purpose::STANDARD.encode(&combined))
 }
 
 pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, Box<dyn Error>> {
-    let decoded_bytes = base64_decode(encoded_message)?;
+    let decoded_bytes = general_purpose::STANDARD.decode(encoded_message)?;
 
     if decoded_bytes.len() < 12 {
         return Err("Invalid encrypted message".into());
