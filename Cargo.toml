@@ -9,7 +9,7 @@ license = "MIT"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "signal"] }
 
 # Message passing (RabbitMQ)
 lapin = "2.0"
@@ -54,10 +54,6 @@ rand = "0.8"
 
 # Testing framework for lazy static initialization
 lazy_static = "1.4"
-
-# Optional: Platform-specific dependencies
-[target.'cfg(unix)'.dependencies]
-tokio = { version = "1", features = ["signal"] }
 
 [dev-dependencies]
 # Testing utilities
