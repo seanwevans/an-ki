@@ -1,8 +1,8 @@
 // consensus.rs: Implements a consensus algorithm to ensure consistency across An nodes.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use tokio::sync::{broadcast, mpsc};
+use std::sync::Arc;
+use tokio::sync::{broadcast, mpsc, RwLock};
 use uuid::Uuid;
 use tracing::{info, error};
 use std::error::Error;
@@ -29,15 +29,15 @@ impl ConsensusState {
         }
     }
 
-    pub fn add_proposal(&self, proposal: ConsensusProposal) {
-        let mut proposals = self.proposals.write().unwrap();
+    pub async fn add_proposal(&self, proposal: ConsensusProposal) {
+        let mut proposals = self.proposals.write().await;
         proposals.insert(proposal.proposal_id, proposal.clone());
-        self.votes.write().unwrap().insert(proposal.proposal_id, 0);
+        self.votes.write().await.insert(proposal.proposal_id, 0);
         info!("Added new proposal: {:?}", proposal);
     }
 
-    pub fn cast_vote(&self, proposal_id: Uuid) {
-        let mut votes = self.votes.write().unwrap();
+    pub async fn cast_vote(&self, proposal_id: Uuid) {
+        let mut votes = self.votes.write().await;
         if let Some(vote_count) = votes.get_mut(&proposal_id) {
             *vote_count += 1;
             info!("Cast vote for proposal: {}. Current votes: {}", proposal_id, *vote_count);
@@ -46,8 +46,8 @@ impl ConsensusState {
         }
     }
 
-    pub fn has_consensus(&self, proposal_id: Uuid, threshold: usize) -> bool {
-        let votes = self.votes.read().unwrap();
+    pub async fn has_consensus(&self, proposal_id: Uuid, threshold: usize) -> bool {
+        let votes = self.votes.read().await;
         if let Some(&vote_count) = votes.get(&proposal_id) {
             vote_count >= threshold
         } else {
@@ -65,11 +65,11 @@ pub async fn run_consensus_protocol(
     loop {
         tokio::select! {
             Some(proposal) = proposal_rx.recv() => {
-                consensus_state.add_proposal(proposal);
+                consensus_state.add_proposal(proposal).await;
             }
             Ok(proposal_id) = vote_rx.recv() => {
-                consensus_state.cast_vote(proposal_id);
-                if consensus_state.has_consensus(proposal_id, consensus_threshold) {
+                consensus_state.cast_vote(proposal_id).await;
+                if consensus_state.has_consensus(proposal_id, consensus_threshold).await {
                     info!("Consensus reached for proposal: {}", proposal_id);
                     // Handle the proposal that reached consensus (e.g., apply an update to the database)
                 }

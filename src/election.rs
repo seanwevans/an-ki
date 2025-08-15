@@ -1,7 +1,7 @@
 // election.rs: Implements leader election for An nodes to ensure redundancy and high availability.
 
-use std::sync::{Arc, RwLock};
-use tokio::sync::broadcast;
+use std::sync::Arc;
+use tokio::sync::{broadcast, RwLock};
 use tokio::time::{self, Duration};
 use uuid::Uuid;
 use tracing::{info, error};
@@ -32,16 +32,16 @@ impl Election {
         }
     }
 
-    pub fn start_election(&self) {
-        let mut node_status = self.node_status.write().unwrap();
+    pub async fn start_election(&self) {
+        let mut node_status = self.node_status.write().await;
         node_status.is_candidate = true;
         info!("Node {} is starting an election as a candidate.", node_status.node_id);
     }
 
-    pub fn set_leader(&self, leader_id: Uuid) {
-        let mut current_leader = self.current_leader.write().unwrap();
+    pub async fn set_leader(&self, leader_id: Uuid) {
+        let mut current_leader = self.current_leader.write().await;
         *current_leader = Some(leader_id);
-        let mut node_status = self.node_status.write().unwrap();
+        let mut node_status = self.node_status.write().await;
         node_status.is_leader = node_status.node_id == leader_id;
         node_status.is_candidate = false;
         info!("Node {} is now the leader: {}", node_status.node_id, node_status.is_leader);
@@ -54,16 +54,16 @@ pub async fn run_leader_election(election: Election, mut rx: broadcast::Receiver
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                let current_leader = election.current_leader.read().unwrap();
+                let current_leader = election.current_leader.read().await;
                 if current_leader.is_none() {
                     info!("No current leader. Initiating a new election.");
-                    election.start_election();
+                    election.start_election().await;
                     // Broadcast the candidacy and handle the election logic (e.g., majority vote)
                 }
             }
             Ok(node_status) = rx.recv() => {
                 if node_status.is_leader {
-                    election.set_leader(node_status.node_id);
+                    election.set_leader(node_status.node_id).await;
                 }
             }
             Err(e) => {
