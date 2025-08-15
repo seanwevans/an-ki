@@ -65,6 +65,7 @@ out/
 .env
 /config/*.json
 /config/*.toml
+!config/default.toml
 
 # Ignore Python bytecode files (if any)
 *.pyc
