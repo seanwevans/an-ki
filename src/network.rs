@@ -5,7 +5,8 @@ use tokio::time::{timeout, Duration};
 use tracing::{info, error};
 use std::error::Error;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use std::collections::HashSet;
 
 #[derive(Clone, Debug)]
@@ -25,7 +26,7 @@ impl NetworkManager {
             match timeout(timeout_duration, TcpStream::connect(address)).await {
                 Ok(Ok(_stream)) => {
                     info!("Successfully connected to node at: {}", address);
-                    self.connected_nodes.write().unwrap().insert(address);
+                    self.connected_nodes.write().await.insert(address);
                     return Ok(());
                 }
                 Ok(Err(e)) => {
@@ -39,8 +40,8 @@ impl NetworkManager {
         Err("Failed to connect after retries".into())
     }
 
-    pub fn disconnect_node(&self, address: &SocketAddr) {
-        let mut nodes = self.connected_nodes.write().unwrap();
+    pub async fn disconnect_node(&self, address: &SocketAddr) {
+        let mut nodes = self.connected_nodes.write().await;
         if nodes.remove(address) {
             info!("Disconnected from node at: {}", address);
         } else {
@@ -48,8 +49,8 @@ impl NetworkManager {
         }
     }
 
-    pub fn list_connected_nodes(&self) -> Vec<SocketAddr> {
-        let nodes = self.connected_nodes.read().unwrap();
+    pub async fn list_connected_nodes(&self) -> Vec<SocketAddr> {
+        let nodes = self.connected_nodes.read().await;
         nodes.iter().cloned().collect()
     }
 }
@@ -69,23 +70,23 @@ mod tests {
         assert!(result.is_err()); // Expected to fail as there is no server at this address
     }
 
-    #[test]
-    fn test_disconnect_node() {
+    #[tokio::test]
+    async fn test_disconnect_node() {
         let network_manager = NetworkManager::new();
         let test_address: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        network_manager.connected_nodes.write().unwrap().insert(test_address);
+        network_manager.connected_nodes.write().await.insert(test_address);
 
-        network_manager.disconnect_node(&test_address);
-        assert!(!network_manager.connected_nodes.read().unwrap().contains(&test_address));
+        network_manager.disconnect_node(&test_address).await;
+        assert!(!network_manager.connected_nodes.read().await.contains(&test_address));
     }
 
-    #[test]
-    fn test_list_connected_nodes() {
+    #[tokio::test]
+    async fn test_list_connected_nodes() {
         let network_manager = NetworkManager::new();
         let test_address: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        network_manager.connected_nodes.write().unwrap().insert(test_address);
+        network_manager.connected_nodes.write().await.insert(test_address);
 
-        let nodes = network_manager.list_connected_nodes();
+        let nodes = network_manager.list_connected_nodes().await;
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0], test_address);
     }
