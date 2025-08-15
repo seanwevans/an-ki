@@ -1,8 +1,9 @@
 // config.rs: Centralizes configuration settings for the distributed neural network.
 
-use config::{Config, ConfigError, Environment, File};
+use config::{Config, ConfigError, Environment, File, FileFormat};
 use serde::Deserialize;
 use std::env;
+use std::path::Path;
 
 #[derive(Debug, Deserialize)]
 pub struct Settings {
@@ -15,8 +16,13 @@ impl Settings {
     pub fn new() -> Result<Self, ConfigError> {
         let mut s = Config::new();
 
-        // Start with a default configuration file
-        s.merge(File::with_name("config/default"))?;
+        // Start with a default configuration file. Prefer `default.toml`,
+        // but fall back to `default.example` if the former is missing.
+        if Path::new("config/default.toml").exists() {
+            s.merge(File::with_name("config/default"))?;
+        } else {
+            s.merge(File::new("config/default.example", FileFormat::Toml))?;
+        }
 
         // Add in environment-specific settings
         let env = env::var("RUN_ENV").unwrap_or_else(|_| "development".into());
