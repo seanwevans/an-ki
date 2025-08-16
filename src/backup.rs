@@ -1,15 +1,16 @@
 // backup.rs: Implements a backup mechanism for task persistence to enhance robustness and redundancy.
+#![allow(dead_code)]
 
 use crate::common::Task;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::sync::{Arc, RwLock};
 use std::collections::HashMap;
-use tracing::{info, error};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::Path;
+use std::sync::{Arc, RwLock};
+use tracing::info;
 use uuid::Uuid;
 use chrono::Utc;
 use std::error::Error;
-use std::path::Path;
 
 #[derive(Clone)]
 pub struct BackupManager {

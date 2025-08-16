@@ -104,6 +104,7 @@ async fn process_update_request(update: UpdateRequest) -> Result<(), Box<dyn Err
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn assign_role(
     node_id: &str,
     role: &str,

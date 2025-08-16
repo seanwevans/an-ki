@@ -1,4 +1,5 @@
 // security.rs: Implements security mechanisms including encryption, decryption, and authentication for nodes.
+#![allow(dead_code)]
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
