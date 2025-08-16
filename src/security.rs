@@ -65,7 +65,8 @@ pub fn verify_token(token: &str) -> Result<TokenData<Claims>, Box<dyn Error>> {
 
 pub fn renew_token(token: &str, expiration_minutes: i64) -> Result<String, Box<dyn Error>> {
     let token_data = verify_token(token)?;
-    generate_token(&token_data.claims.sub, &token_data.claims.role, expiration_minutes)
+    let Claims { sub, role, .. } = &token_data.claims;
+    generate_token(sub, role, expiration_minutes)
 }
 
 pub fn encrypt_message(message: &str, key: &str) -> Result<String, Box<dyn Error>> {
