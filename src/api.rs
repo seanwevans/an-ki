@@ -1,8 +1,8 @@
 // api.rs: Implements REST API endpoints for interacting with the task recovery system.
+#![allow(dead_code)]
 
-use crate::task_recovery::TaskRecoveryManager;
 use crate::common::Task;
-use serde::Deserialize;
+use crate::task_recovery::TaskRecoveryManager;
 use std::sync::Arc;
 use uuid::Uuid;
 use warp::http::StatusCode;

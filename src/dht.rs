@@ -1,4 +1,5 @@
 // dht.rs: Implements a distributed hash table (DHT) for node discovery and coordination.
+#![allow(dead_code)]
 
 use crate::common::NodeInfo;
 use crate::database::Database;
@@ -9,13 +10,13 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 #[derive(Clone)]
-pub struct DHT {
+pub struct Dht {
     nodes: Arc<RwLock<HashMap<Uuid, NodeInfo>>>,
 }
 
-impl DHT {
+impl Dht {
     pub fn new() -> Self {
-        DHT {
+        Dht {
             nodes: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -50,7 +51,7 @@ impl DHT {
 }
 
 // Store DHT in the database
-pub async fn store_dht_in_db(dht: &DHT, db: &Database) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn store_dht_in_db(dht: &Dht, db: &Database) -> Result<(), Box<dyn std::error::Error>> {
     let nodes = dht.list_nodes().await;
     for node in nodes {
         let node_id_str = node.id.to_string();
@@ -68,8 +69,8 @@ pub async fn store_dht_in_db(dht: &DHT, db: &Database) -> Result<(), Box<dyn std
     Ok(())
 }
 
-pub async fn load_dht_from_db(db: &Database) -> Result<DHT, Box<dyn std::error::Error>> {
-    let dht = DHT::new();
+pub async fn load_dht_from_db(db: &Database) -> Result<Dht, Box<dyn std::error::Error>> {
+    let dht = Dht::new();
     let rows = db
         .query("SELECT node_id, node_info FROM dht", &[])
         .await

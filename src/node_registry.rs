@@ -1,4 +1,5 @@
 // node_registry.rs: Implements a node registry for keeping track of active nodes in the distributed neural network system.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::Arc;
