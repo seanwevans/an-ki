@@ -1,10 +1,11 @@
 // an_node.rs: Contains the logic for An nodes, including task distribution to Ki nodes and local database handling.
 
-use lapin::{options::*, types::FieldTable, BasicProperties, Connection, ConnectionProperties};
-use serde::{Deserialize, Serialize};
 use std::error::Error;
-use tracing::{error, info};
+
 use futures_util::stream::StreamExt;
+use lapin::{options::*, types::FieldTable, Connection, ConnectionProperties};
+use serde::{Deserialize, Serialize};
+use tracing::{error, info};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct TaskMessage {
