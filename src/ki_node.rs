@@ -1,10 +1,10 @@
 // ki_node.rs: Manages the Ki node behavior, including fetching inputs, running computations, and sending outputs.
 
+use futures_util::stream::StreamExt;
 use lapin::{options::*, types::FieldTable, BasicProperties, Connection, ConnectionProperties};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tracing::{error, info};
-use futures_util::stream::StreamExt;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct TaskMessage {
@@ -20,9 +20,20 @@ struct ResultMessage {
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
     // Establish connection to RabbitMQ
-    let amqp_addr = std::env::var("AMQP_ADDR").unwrap_or_else(|_| "amqp://127.0.0.1:5672/%2f".into());
-    let connection = Connection::connect(&amqp_addr, ConnectionProperties::default()).await?;
-    let channel = connection.create_channel().await?;
+    let amqp_addr = std::env::var("AMQP_ADDR").map_err(|e| {
+        error!("Failed to read AMQP_ADDR environment variable: {:?}", e);
+        e
+    })?;
+    let connection = Connection::connect(&amqp_addr, ConnectionProperties::default())
+        .await
+        .map_err(|e| {
+            error!("Failed to connect to RabbitMQ: {:?}", e);
+            e
+        })?;
+    let channel = connection.create_channel().await.map_err(|e| {
+        error!("Failed to create channel: {:?}", e);
+        e
+    })?;
 
     // Declare the queue for receiving tasks from the An node
     let queue_name = "ki_task_queue";
@@ -32,7 +43,11 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             QueueDeclareOptions::default(),
             FieldTable::default(),
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            error!("Failed to declare queue: {:?}", e);
+            e
+        })?;
 
     // Start consuming tasks from the queue
     let mut consumer = channel
@@ -42,13 +57,23 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             BasicConsumeOptions::default(),
             FieldTable::default(),
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            error!("Failed to start consuming: {:?}", e);
+            e
+        })?;
 
     info!("Ki node is running and waiting for tasks...");
 
     while let Some(delivery_result) = consumer.next().await {
-        let delivery = delivery_result?;
-        let task_message: TaskMessage = serde_json::from_slice(&delivery.data)?;
+        let delivery = delivery_result.map_err(|e| {
+            error!("Failed to receive delivery: {:?}", e);
+            e
+        })?;
+        let task_message: TaskMessage = serde_json::from_slice(&delivery.data).map_err(|e| {
+            error!("Failed to deserialize task message: {:?}", e);
+            e
+        })?;
 
         info!("Received task: {:?}", task_message);
 
@@ -61,7 +86,13 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         }
 
         // Acknowledge the message
-        delivery.ack(BasicAckOptions::default()).await?;
+        delivery
+            .ack(BasicAckOptions::default())
+            .await
+            .map_err(|e| {
+                error!("Failed to acknowledge message: {:?}", e);
+                e
+            })?;
     }
 
     Ok(())
@@ -79,11 +110,17 @@ async fn perform_computation(task: TaskMessage) -> ResultMessage {
     }
 }
 
-async fn send_result(result: ResultMessage, channel: &lapin::Channel) -> Result<(), Box<dyn Error>> {
+async fn send_result(
+    result: ResultMessage,
+    channel: &lapin::Channel,
+) -> Result<(), Box<dyn Error>> {
     let result_queue = "an_result_queue";
 
     // Serialize the result message
-    let payload = serde_json::to_vec(&result)?;
+    let payload = serde_json::to_vec(&result).map_err(|e| {
+        error!("Failed to serialize result: {:?}", e);
+        e
+    })?;
 
     // Publish the result to the An node
     channel
@@ -94,7 +131,11 @@ async fn send_result(result: ResultMessage, channel: &lapin::Channel) -> Result<
             &payload,
             BasicProperties::default(),
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            error!("Failed to publish result: {:?}", e);
+            e
+        })?;
 
     info!("Sent result for task ID: {}", result.task_id);
     Ok(())

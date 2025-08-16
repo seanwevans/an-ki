@@ -25,7 +25,13 @@ impl Scheduler {
     pub async fn schedule_task(&self, task: Task) -> Result<(), Box<dyn Error>> {
         if let Some(node_id) = self.load_balancer.assign_task().await {
             info!("Scheduling task {} to node {}", task.task_id, node_id);
-            self.task_tx.send(task).await?;
+            self.task_tx
+                .send(task)
+                .await
+                .map_err(|e| {
+                    error!("Failed to send task: {:?}", e);
+                    e
+                })?;
             Ok(())
         } else {
             error!("No available nodes to schedule task {}");
