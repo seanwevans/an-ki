@@ -2,11 +2,17 @@
 
 use lapin::{options::*, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties};
 use std::error::Error;
-use tracing::info;
+use tracing::{error, info};
 
 pub async fn establish_connection(amqp_addr: &str) -> Result<Channel, Box<dyn Error>> {
-    let connection = Connection::connect(amqp_addr, ConnectionProperties::default()).await?;
-    let channel = connection.create_channel().await?;
+    let connection = Connection::connect(amqp_addr, ConnectionProperties::default()).await.map_err(|e| {
+        error!("Failed to connect to RabbitMQ: {:?}", e);
+        e
+    })?;
+    let channel = connection.create_channel().await.map_err(|e| {
+        error!("Failed to create channel: {:?}", e);
+        e
+    })?;
     info!("Established connection to RabbitMQ at: {}", amqp_addr);
     Ok(channel)
 }
@@ -18,7 +24,11 @@ pub async fn declare_queue(channel: &Channel, queue_name: &str) -> Result<(), Bo
             QueueDeclareOptions::default(),
             FieldTable::default(),
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            error!("Failed to declare queue: {:?}", e);
+            e
+        })?;
     info!("Declared queue: {}", queue_name);
     Ok(())
 }
@@ -32,7 +42,11 @@ pub async fn publish_message(channel: &Channel, queue_name: &str, payload: &[u8]
             payload,
             BasicProperties::default(),
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            error!("Failed to publish message: {:?}", e);
+            e
+        })?;
     info!("Published message to queue: {}", queue_name);
     Ok(())
 }
@@ -45,7 +59,11 @@ pub async fn consume_messages(channel: &Channel, queue_name: &str, consumer_tag:
             BasicConsumeOptions::default(),
             FieldTable::default(),
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            error!("Failed to start consuming: {:?}", e);
+            e
+        })?;
     info!("Started consuming messages from queue: {}", queue_name);
     Ok(consumer)
 }
