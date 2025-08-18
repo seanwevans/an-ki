@@ -58,33 +58,62 @@ impl NetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
     use tokio::time::Duration;
 
     #[tokio::test]
     async fn test_connect_to_node() {
         let network_manager = NetworkManager::new();
-        let test_address: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let test_address = listener.local_addr().unwrap();
 
-        let result = network_manager.connect_to_node(test_address, 3, Duration::from_secs(1)).await;
-        assert!(result.is_err()); // Expected to fail as there is no server at this address
+        // Successful connection while listener is active
+        let result = network_manager
+            .connect_to_node(test_address, 3, Duration::from_secs(1))
+            .await;
+        assert!(result.is_ok());
+
+        // Drop listener and ensure connection now fails
+        drop(listener);
+        let result = network_manager
+            .connect_to_node(test_address, 1, Duration::from_secs(1))
+            .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_disconnect_node() {
         let network_manager = NetworkManager::new();
-        let test_address: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        network_manager.connected_nodes.write().await.insert(test_address);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let test_address = listener.local_addr().unwrap();
+        drop(listener);
+        network_manager
+            .connected_nodes
+            .write()
+            .await
+            .insert(test_address);
 
         network_manager.disconnect_node(&test_address).await;
-        assert!(!network_manager.connected_nodes.read().await.contains(&test_address));
+        assert!(
+            !network_manager
+                .connected_nodes
+                .read()
+                .await
+                .contains(&test_address)
+        );
     }
 
     #[tokio::test]
     async fn test_list_connected_nodes() {
         let network_manager = NetworkManager::new();
-        let test_address: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        network_manager.connected_nodes.write().await.insert(test_address);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let test_address = listener.local_addr().unwrap();
+        drop(listener);
+        network_manager
+            .connected_nodes
+            .write()
+            .await
+            .insert(test_address);
 
         let nodes = network_manager.list_connected_nodes().await;
         assert_eq!(nodes.len(), 1);
