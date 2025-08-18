@@ -23,7 +23,9 @@ impl Validator {
     }
 
     pub fn validate_ip_address(ip_address: &str) -> Result<(), Box<dyn Error>> {
-        let ip_regex = Regex::new(r"^((25[0-5]|2[0-4][0-9]|[0-1]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[0-1]?[0-9][0-9]?)$")?;
+        let ip_regex = Regex::new(
+            r"^((25[0-5]|2[0-4][0-9]|[0-1]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[0-1]?[0-9][0-9]?)$",
+        )?;
         if ip_regex.is_match(ip_address) {
             info!("Valid IP address: {}", ip_address);
             Ok(())
