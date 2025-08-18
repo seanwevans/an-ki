@@ -14,6 +14,7 @@ mod task_recovery; // Added task recovery module
 mod database; // Database abstraction
 mod dht; // Distributed hash table utilities
 mod common; // Shared types
+mod messaging; // Messaging module for RabbitMQ interactions
 
 #[tokio::main]
 async fn main() {
