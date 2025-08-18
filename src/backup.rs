@@ -3,10 +3,13 @@
 
 use crate::common::Task;
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::fs as async_fs;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::RwLock;
 use tracing::info;
 use uuid::Uuid;
 use chrono::Utc;
@@ -30,24 +33,28 @@ impl BackupManager {
         }
     }
 
-    pub fn create_backup(&self) -> Result<(), Box<dyn Error>> {
+    pub async fn create_backup(&self) -> Result<(), Box<dyn Error>> {
         let timestamp = Utc::now().format("%Y%m%d%H%M%S").to_string();
         let backup_file_path = format!("{}/backup_{}.json", self.backup_dir, timestamp);
 
-        let tasks = self.tasks.read().unwrap();
+        let tasks = self.tasks.read().await;
         let content = serde_json::to_string(&*tasks)?;
-        let mut file = OpenOptions::new().write(true).create(true).open(&backup_file_path)?;
-        file.write_all(content.as_bytes())?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&backup_file_path)
+            .await?;
+        file.write_all(content.as_bytes()).await?;
 
         info!("Created backup at: {}", backup_file_path);
         Ok(())
     }
 
-    pub fn restore_backup(&self, backup_file: &str) -> Result<(), Box<dyn Error>> {
-        let content = fs::read_to_string(backup_file)?;
+    pub async fn restore_backup(&self, backup_file: &str) -> Result<(), Box<dyn Error>> {
+        let content = async_fs::read_to_string(backup_file).await?;
         let recovered_tasks: HashMap<Uuid, Task> = serde_json::from_str(&content)?;
 
-        let mut tasks = self.tasks.write().unwrap();
+        let mut tasks = self.tasks.write().await;
         *tasks = recovered_tasks;
         info!("Restored tasks from backup file: {}", backup_file);
         Ok(())
@@ -59,8 +66,8 @@ mod tests {
     use super::*;
     use std::fs;
 
-    #[test]
-    fn test_create_and_restore_backup() {
+    #[tokio::test]
+    async fn test_create_and_restore_backup() {
         let backup_dir = "test_backups";
         let backup_manager = BackupManager::new(backup_dir);
 
@@ -68,10 +75,10 @@ mod tests {
             task_id: Uuid::new_v4(),
             data: "Backup test task data".to_string(),
         };
-        backup_manager.tasks.write().unwrap().insert(task.task_id, task.clone());
+        backup_manager.tasks.write().await.insert(task.task_id, task.clone());
 
         // Create a backup
-        backup_manager.create_backup().unwrap();
+        backup_manager.create_backup().await.unwrap();
 
         // Find the backup file that was just created
         let backup_files: Vec<_> = fs::read_dir(backup_dir)
@@ -82,9 +89,9 @@ mod tests {
         let backup_file_path = backup_files[0].path().to_str().unwrap().to_string();
 
         // Clear the current tasks and restore from backup
-        backup_manager.tasks.write().unwrap().clear();
-        backup_manager.restore_backup(&backup_file_path).unwrap();
-        assert!(backup_manager.tasks.read().unwrap().contains_key(&task.task_id));
+        backup_manager.tasks.write().await.clear();
+        backup_manager.restore_backup(&backup_file_path).await.unwrap();
+        assert!(backup_manager.tasks.read().await.contains_key(&task.task_id));
 
         // Clean up backup files
         fs::remove_dir_all(backup_dir).unwrap();

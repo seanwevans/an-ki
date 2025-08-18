@@ -15,6 +15,7 @@ mod database; // Database abstraction
 mod dht; // Distributed hash table utilities
 mod common; // Shared types
 mod load_balancer; // Load balancing logic
+mod messaging; // Messaging module for RabbitMQ interactions
 
 #[tokio::main]
 async fn main() {

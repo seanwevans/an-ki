@@ -67,3 +67,51 @@ pub async fn consume_messages(channel: &Channel, queue_name: &str, consumer_tag:
     info!("Started consuming messages from queue: {}", queue_name);
     Ok(consumer)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use lapin::options::BasicAckOptions;
+    use tokio::time::{timeout, Duration};
+
+    const AMQP_ADDR: &str = "amqp://127.0.0.1:5672/%2f";
+
+    #[tokio::test]
+    async fn test_messaging_workflow() {
+        let channel = establish_connection(AMQP_ADDR)
+            .await
+            .expect("connection");
+
+        declare_queue(&channel, "test_queue")
+            .await
+            .expect("declare");
+
+        publish_message(&channel, "test_queue", b"hello")
+            .await
+            .expect("publish");
+
+        let mut consumer = consume_messages(&channel, "test_queue", "test_consumer")
+            .await
+            .expect("consume");
+
+        let delivery = timeout(Duration::from_secs(5), consumer.next())
+            .await
+            .expect("consumer timed out")
+            .expect("consumer closed")
+            .expect("delivery error");
+
+        assert_eq!(delivery.data, b"hello");
+
+        delivery
+            .ack(BasicAckOptions::default())
+            .await
+            .expect("ack");
+    }
+
+    #[tokio::test]
+    async fn test_connection_failure() {
+        let result = establish_connection("amqp://invalid:5672/%2f").await;
+        assert!(result.is_err());
+    }
+}
