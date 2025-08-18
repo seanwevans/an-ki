@@ -14,6 +14,7 @@ mod task_recovery; // Added task recovery module
 mod database; // Database abstraction
 mod dht; // Distributed hash table utilities
 mod common; // Shared types
+mod load_balancer; // Load balancing logic
 
 #[tokio::main]
 async fn main() {
