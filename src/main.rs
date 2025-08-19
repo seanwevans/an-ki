@@ -4,18 +4,19 @@ use std::env;
 use tracing::error;
 
 mod an_node;
-mod ki_node;
-mod principal;
-mod security; // Added security module
-mod node_registry; // Added node registry module
-mod backup; // Added backup module
 mod api; // Added API module
-mod task_recovery; // Added task recovery module
+mod backup; // Added backup module
+mod common; // Shared types
 mod database; // Database abstraction
 mod dht; // Distributed hash table utilities
-mod common; // Shared types
+mod ki_node;
 mod load_balancer; // Load balancing logic
-mod messaging; // Messaging module for RabbitMQ interactions
+mod messaging;
+mod node_registry; // Added node registry module
+mod principal;
+mod security; // Added security module
+mod signals; // Signal handling utilities
+mod task_recovery; // Added task recovery module // Messaging module for RabbitMQ interactions
 
 #[tokio::main]
 async fn main() {
