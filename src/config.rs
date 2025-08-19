@@ -35,6 +35,13 @@ impl Settings {
     }
 }
 
+/// Convenience function to load [`Settings`] using the default configuration
+/// sources. This allows callers to access configuration without needing to
+/// instantiate `Settings` directly.
+pub fn load_settings() -> Result<Settings, ConfigError> {
+    Settings::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

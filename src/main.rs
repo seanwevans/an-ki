@@ -6,6 +6,7 @@ use tracing::error;
 mod an_node;
 mod ki_node;
 mod principal;
+mod config;
 mod security; // Added security module
 mod node_registry; // Added node registry module
 mod backup; // Added backup module

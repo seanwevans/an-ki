@@ -7,6 +7,8 @@ use lapin::{options::*, types::FieldTable, Connection, ConnectionProperties};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
+use crate::config::load_settings;
+
 #[derive(Serialize, Deserialize, Debug)]
 struct TaskMessage {
     task_id: String,
@@ -14,15 +16,18 @@ struct TaskMessage {
 }
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
-    // Establish connection to RabbitMQ
-    let amqp_addr = std::env::var("AMQP_ADDR").map_err(|e| {
-        error!("Failed to read AMQP_ADDR environment variable: {:?}", e);
+    // Establish connection to RabbitMQ using configuration settings
+    let settings = load_settings().map_err(|e| {
+        error!("Failed to load settings: {:?}", e);
         e
     })?;
-    let connection = Connection::connect(&amqp_addr, ConnectionProperties::default()).await.map_err(|e| {
-        error!("Failed to connect to RabbitMQ: {:?}", e);
-        e
-    })?;
+    let connection =
+        Connection::connect(&settings.amqp_addr, ConnectionProperties::default())
+            .await
+            .map_err(|e| {
+                error!("Failed to connect to RabbitMQ: {:?}", e);
+                e
+            })?;
     let channel = connection.create_channel().await.map_err(|e| {
         error!("Failed to create channel: {:?}", e);
         e
