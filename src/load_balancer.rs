@@ -96,6 +96,7 @@ pub async fn monitor_node_load(mut rx: broadcast::Receiver<NodeLoadInfo>, load_b
 mod tests {
     use super::*;
     use std::collections::HashSet;
+    use tokio::time::{sleep, Duration};
 
     #[tokio::test]
     async fn test_assign_task_chooses_least_loaded() {
@@ -166,5 +167,29 @@ mod tests {
         assert_eq!(nodes.get(&node1).unwrap().task_count, 1);
         assert_eq!(nodes.get(&node2).unwrap().task_count, 1);
         assert_eq!(nodes.get(&node3).unwrap().task_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_remove_and_random_node() {
+        let lb = LoadBalancer::new();
+        let node = Uuid::new_v4();
+        lb.add_node(node).await;
+        assert_eq!(lb.random_node().await, Some(node));
+        lb.remove_node(&node).await;
+        assert!(lb.random_node().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_monitor_node_load_updates() {
+        let lb = LoadBalancer::new();
+        let node = Uuid::new_v4();
+        lb.add_node(node).await;
+        let (tx, rx) = broadcast::channel(1);
+        let lb_clone = lb.clone();
+        tokio::spawn(async move { monitor_node_load(rx, lb_clone).await; });
+        tx.send(NodeLoadInfo { node_id: node, task_count: 4 }).unwrap();
+        sleep(Duration::from_millis(50)).await;
+        let nodes = lb.nodes.read().await;
+        assert_eq!(nodes.get(&node).unwrap().task_count, 4);
     }
 }

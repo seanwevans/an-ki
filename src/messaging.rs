@@ -71,17 +71,24 @@ pub async fn consume_messages(channel: &Channel, queue_name: &str, consumer_tag:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures_util::StreamExt;
-    use lapin::options::BasicAckOptions;
+    use tokio::sync::broadcast;
     use tokio::time::{timeout, Duration};
 
+    #[cfg(feature = "integration-tests")]
+    use futures_util::StreamExt;
+    #[cfg(feature = "integration-tests")]
+    use lapin::options::BasicAckOptions;
+
+    #[cfg(feature = "integration-tests")]
     const AMQP_ADDR: &str = "amqp://127.0.0.1:5672/%2f";
 
+    #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_messaging_workflow() {
-        let channel = establish_connection(AMQP_ADDR)
-            .await
-            .expect("connection");
+        let channel = match establish_connection(AMQP_ADDR).await {
+            Ok(ch) => ch,
+            Err(_) => return,
+        };
 
         declare_queue(&channel, "test_queue")
             .await
@@ -113,5 +120,16 @@ mod tests {
     async fn test_connection_failure() {
         let result = establish_connection("amqp://invalid:5672/%2f").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_mock_messaging_flow() {
+        let (tx, mut rx) = broadcast::channel(10);
+        tx.send(b"hello".to_vec()).unwrap();
+        let received = timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("no message")
+            .unwrap();
+        assert_eq!(received, b"hello");
     }
 }

@@ -1,12 +1,21 @@
 // ki_node.rs: Manages the Ki node behavior, including fetching inputs, running computations, and sending outputs.
 
+
 use crate::signals;
+use crate::messaging::{consume_messages, declare_queue, establish_connection, publish_message};
 use futures_util::stream::StreamExt;
-use lapin::{options::*, types::FieldTable, BasicProperties, Connection, ConnectionProperties};
+use lapin::{
+    options::{BasicAckOptions, BasicPublishOptions},
+    BasicProperties,
+};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tokio::sync::oneshot;
+use tokio::time::{sleep, Duration};
 use tracing::{error, info};
+
+use crate::config::load_settings;
+use crate::messaging;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct TaskMessage {
@@ -37,9 +46,13 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     // Establish connection to RabbitMQ
     let amqp_addr = std::env::var("AMQP_ADDR").map_err(|e| {
         error!("Failed to read AMQP_ADDR environment variable: {:?}", e);
+
+    // Establish connection to RabbitMQ using configuration settings
+    let settings = load_settings().map_err(|e| {
+        error!("Failed to load settings: {:?}", e);
         e
     })?;
-    let connection = Connection::connect(&amqp_addr, ConnectionProperties::default())
+    let connection = Connection::connect(&settings.amqp_addr, ConnectionProperties::default())
         .await
         .map_err(|e| {
             error!("Failed to connect to RabbitMQ: {:?}", e);
@@ -51,32 +64,88 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     })?;
 
     // Declare the queue for receiving tasks from the An node
+    // Read configuration values
+    let amqp_addr = std::env::var("AMQP_ADDR").map_err(|e| {
+        error!("Failed to read AMQP_ADDR environment variable: {:?}", e);
+        e
+    })?;
+    let max_retries: u32 = std::env::var("AMQP_RECONNECT_ATTEMPTS")
+        .unwrap_or_else(|_| "5".into())
+        .parse()
+        .unwrap_or(5);
+    let backoff_ms: u64 = std::env::var("AMQP_RECONNECT_BACKOFF_MS")
+        .unwrap_or_else(|_| "500".into())
+        .parse()
+        .unwrap_or(500);
+    let channel = establish_connection(&amqp_addr).await?;
     let queue_name = "ki_task_queue";
-    channel
-        .queue_declare(
-            queue_name,
-            QueueDeclareOptions::default(),
-            FieldTable::default(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to declare queue: {:?}", e);
-            e
-        })?;
+    let consumer_tag = "ki_consumer";
+
+    let mut attempts = 0u32;
+
+    loop {
+        // Establish connection and consumer using messaging helpers
+        let (channel, mut consumer) =
+            match setup_consumer(&amqp_addr, queue_name, consumer_tag).await {
+                Ok(c) => {
+                    attempts = 0; // reset attempts on success
+                    c
+                }
+                Err(e) => {
+                    attempts += 1;
+                    error!(
+                        "Failed to establish connection: {:?}. Attempt {}/{}",
+                        e, attempts, max_retries
+                    );
+                    if attempts >= max_retries {
+                        error!("Exceeded maximum reconnection attempts. Exiting.");
+                        return Err(e);
+                    }
+                    let delay = backoff_ms * 2u64.pow(attempts - 1);
+                    sleep(Duration::from_millis(delay)).await;
+                    continue;
+                }
+            };
+
+        info!("Ki node is running and waiting for tasks...");
+
+        loop {
+            match consumer.next().await {
+                Some(Ok(delivery)) => {
+                    let task_message: TaskMessage = serde_json::from_slice(&delivery.data)
+                        .map_err(|e| {
+                            error!("Failed to deserialize task message: {:?}", e);
+                            e
+                        })?;
+
+                    info!("Received task: {:?}", task_message);
+
+                    // Perform computation and generate result
+                    let result = perform_computation(task_message).await;
+
+                    // Send the result back to the An node
+                    if let Err(e) = send_result(result, &channel).await {
+                        error!("Failed to send result: {:?}", e);
+                    }
+
+                    // Acknowledge the message
+                    if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
+                        error!("Failed to acknowledge message: {:?}", e);
+                    }
+                }
+                Some(Err(e)) => {
+                    error!("Error in consumer stream: {:?}", e);
+                    break;
+                }
+                None => {
+                    error!("Consumer stream closed");
+                    break;
+                }
+            }
+    declare_queue(&channel, queue_name).await?;
 
     // Start consuming tasks from the queue
-    let mut consumer = channel
-        .basic_consume(
-            queue_name,
-            "ki_consumer",
-            BasicConsumeOptions::default(),
-            FieldTable::default(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to start consuming: {:?}", e);
-            e
-        })?;
+    let mut consumer = consume_messages(&channel, queue_name, "ki_consumer").await?;
 
     info!("Ki node is running and waiting for tasks...");
 
@@ -119,14 +188,33 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         }
     }
 
+
     if let Err(e) = channel.close(200, "Bye").await {
         error!("Failed to close channel: {:?}", e);
     }
     if let Err(e) = connection.close(200, "Bye").await {
         error!("Failed to close connection: {:?}", e);
-    }
 
-    Ok(())
+        // Consumer ended; attempt to reconnect
+        attempts += 1;
+        if attempts > max_retries {
+            error!("Failed to reconnect after {} attempts", max_retries);
+            return Err("reconnection attempts exceeded".into());
+        }
+        let delay = backoff_ms * 2u64.pow(attempts - 1);
+        sleep(Duration::from_millis(delay)).await;
+    }
+}
+
+async fn setup_consumer(
+    amqp_addr: &str,
+    queue_name: &str,
+    consumer_tag: &str,
+) -> Result<(lapin::Channel, lapin::Consumer), Box<dyn Error>> {
+    let channel = messaging::establish_connection(amqp_addr).await?;
+    messaging::declare_queue(&channel, queue_name).await?;
+    let consumer = messaging::consume_messages(&channel, queue_name, consumer_tag).await?;
+    Ok((channel, consumer))
 }
 
 async fn perform_computation(task: TaskMessage) -> ResultMessage {
@@ -153,20 +241,7 @@ async fn send_result(
         e
     })?;
 
-    // Publish the result to the An node
-    channel
-        .basic_publish(
-            "",
-            result_queue,
-            BasicPublishOptions::default(),
-            &payload,
-            BasicProperties::default(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to publish result: {:?}", e);
-            e
-        })?;
+    publish_message(channel, result_queue, &payload).await?;
 
     info!("Sent result for task ID: {}", result.task_id);
     Ok(())

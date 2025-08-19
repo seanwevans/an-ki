@@ -1,11 +1,15 @@
 // principal.rs: Implements the specific responsibilities of the Principal, including role management and global coordination.
+
 use crate::signals;
+use crate::messaging::{consume_messages, declare_queue, establish_connection, publish_message};
+
 use futures_util::stream::StreamExt;
-use lapin::{options::*, types::FieldTable, BasicProperties, Connection, ConnectionProperties};
+use lapin::options::BasicAckOptions;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tokio::sync::oneshot;
 use tracing::{error, info};
+use crate::config::load_settings;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct RoleAssignment {
@@ -36,9 +40,15 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     // Establish connection to RabbitMQ
     let amqp_addr = std::env::var("AMQP_ADDR").map_err(|e| {
         error!("Failed to read AMQP_ADDR environment variable: {:?}", e);
+
+    // Establish connection to RabbitMQ using configuration settings
+    let settings = load_settings().map_err(|e| {
+        error!("Failed to load settings: {:?}", e);
+
         e
     })?;
-    let connection = Connection::connect(&amqp_addr, ConnectionProperties::default())
+
+    let connection = Connection::connect(&settings.amqp_addr, ConnectionProperties::default())
         .await
         .map_err(|e| {
             error!("Failed to connect to RabbitMQ: {:?}", e);
@@ -51,31 +61,10 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     // Declare the queue for receiving update requests from An nodes
     let queue_name = "principal_update_queue";
-    channel
-        .queue_declare(
-            queue_name,
-            QueueDeclareOptions::default(),
-            FieldTable::default(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to declare queue: {:?}", e);
-            e
-        })?;
+    declare_queue(&channel, queue_name).await?;
 
     // Start consuming update requests from the queue
-    let mut consumer = channel
-        .basic_consume(
-            queue_name,
-            "principal_consumer",
-            BasicConsumeOptions::default(),
-            FieldTable::default(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to start consuming: {:?}", e);
-            e
-        })?;
+    let mut consumer = consume_messages(&channel, queue_name, "principal_consumer").await?;
 
     info!("Principal node is running and waiting for update requests...");
 
@@ -154,19 +143,7 @@ pub async fn assign_role(
 
     // Publish the role assignment to the role management queue
     let role_queue = "role_assignment_queue";
-    channel
-        .basic_publish(
-            "",
-            role_queue,
-            BasicPublishOptions::default(),
-            &payload,
-            BasicProperties::default(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to publish role assignment: {:?}", e);
-            e
-        })?;
+    publish_message(channel, role_queue, &payload).await?;
 
     info!("Assigned role '{}' to node '{}'", role, node_id);
     Ok(())
