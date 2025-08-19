@@ -1,8 +1,6 @@
 // dht.rs: Implements a distributed hash table (DHT) for node discovery and coordination.
-#![allow(dead_code)]
 
 use crate::common::NodeInfo;
-use crate::database::Database;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -44,45 +42,53 @@ impl Dht {
         nodes.get(node_id).cloned()
     }
 
-    pub async fn list_nodes(&self) -> Vec<NodeInfo> {
-        let nodes = self.nodes.read().await;
-        nodes.values().cloned().collect()
-    }
+pub async fn list_nodes(&self) -> Vec<NodeInfo> {
+    let nodes = self.nodes.read().await;
+    nodes.values().cloned().collect()
+}
 }
 
-// Store DHT in the database
-pub async fn store_dht_in_db(dht: &Dht, db: &Database) -> Result<(), Box<dyn std::error::Error>> {
-    let nodes = dht.list_nodes().await;
-    for node in nodes {
-        let node_id_str = node.id.to_string();
-        let serialized_node = serde_json::to_string(&node)?;
-        db.execute(
-            "INSERT INTO dht (node_id, node_info) VALUES ($1, $2) ON CONFLICT (node_id) DO UPDATE SET node_info = $2",
-            &[&node_id_str, &serialized_node],
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to store node in database: {:?}", e);
-            e
-        })?;
-    }
-    Ok(())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
 
-pub async fn load_dht_from_db(db: &Database) -> Result<Dht, Box<dyn std::error::Error>> {
-    let dht = Dht::new();
-    let rows = db
-        .query("SELECT node_id, node_info FROM dht", &[])
-        .await
-        .map_err(|e| {
-            error!("Failed to load DHT from database: {:?}", e);
-            e
-        })?;
-    for row in rows {
-        let _node_id: String = row.get(0);
-        let node_info_str: String = row.get(1);
-        let node_info: NodeInfo = serde_json::from_str(&node_info_str)?;
-        dht.add_node(node_info).await;
+    fn sample_node(role: &str) -> NodeInfo {
+        NodeInfo {
+            id: Uuid::new_v4(),
+            address: None,
+            last_seen: Some(Utc::now()),
+            role: role.to_string(),
+        }
     }
-    Ok(dht)
+
+    #[tokio::test]
+    async fn test_add_and_get_node() {
+        let dht = Dht::new();
+        let node = sample_node("test");
+        let id = node.id;
+        dht.add_node(node).await;
+        let retrieved = dht.get_node(&id).await;
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().id, id);
+    }
+
+    #[tokio::test]
+    async fn test_remove_node() {
+        let dht = Dht::new();
+        let node = sample_node("test");
+        let id = node.id;
+        dht.add_node(node).await;
+        dht.remove_node(&id).await;
+        assert!(dht.get_node(&id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_nodes() {
+        let dht = Dht::new();
+        dht.add_node(sample_node("a")).await;
+        dht.add_node(sample_node("b")).await;
+        let nodes = dht.list_nodes().await;
+        assert_eq!(nodes.len(), 2);
+    }
 }
