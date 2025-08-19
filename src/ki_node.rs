@@ -1,5 +1,6 @@
 // ki_node.rs: Manages the Ki node behavior, including fetching inputs, running computations, and sending outputs.
 
+use crate::messaging::{consume_messages, declare_queue, establish_connection, publish_message};
 use futures_util::stream::StreamExt;
 use lapin::{
     options::{BasicAckOptions, BasicPublishOptions},
@@ -38,7 +39,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|_| "500".into())
         .parse()
         .unwrap_or(500);
-
+    let channel = establish_connection(&amqp_addr).await?;
     let queue_name = "ki_task_queue";
     let consumer_tag = "ki_consumer";
 
@@ -103,6 +104,31 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                     break;
                 }
             }
+    declare_queue(&channel, queue_name).await?;
+
+    // Start consuming tasks from the queue
+    let mut consumer = consume_messages(&channel, queue_name, "ki_consumer").await?;
+
+    info!("Ki node is running and waiting for tasks...");
+
+    while let Some(delivery_result) = consumer.next().await {
+        let delivery = delivery_result.map_err(|e| {
+            error!("Failed to receive delivery: {:?}", e);
+            e
+        })?;
+        let task_message: TaskMessage = serde_json::from_slice(&delivery.data).map_err(|e| {
+            error!("Failed to deserialize task message: {:?}", e);
+            e
+        })?;
+
+        info!("Received task: {:?}", task_message);
+
+        // Perform computation and generate result
+        let result = perform_computation(task_message).await;
+
+        // Send the result back to the An node
+        if let Err(e) = send_result(result, &channel).await {
+            error!("Failed to send result: {:?}", e);
         }
 
         // Consumer ended; attempt to reconnect
@@ -151,20 +177,7 @@ async fn send_result(
         e
     })?;
 
-    // Publish the result to the An node
-    channel
-        .basic_publish(
-            "",
-            result_queue,
-            BasicPublishOptions::default(),
-            &payload,
-            BasicProperties::default(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to publish result: {:?}", e);
-            e
-        })?;
+    publish_message(channel, result_queue, &payload).await?;
 
     info!("Sent result for task ID: {}", result.task_id);
     Ok(())

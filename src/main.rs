@@ -11,7 +11,6 @@ mod node_registry; // Added node registry module
 mod backup; // Added backup module
 mod api; // Added API module
 mod task_recovery; // Added task recovery module
-mod database; // Database abstraction
 mod dht; // Distributed hash table utilities
 mod common; // Shared types
 mod load_balancer; // Load balancing logic

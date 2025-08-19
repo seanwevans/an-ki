@@ -1,5 +1,4 @@
 // backup.rs: Implements a backup mechanism for task persistence to enhance robustness and redundancy.
-#![allow(dead_code)]
 
 use crate::common::Task;
 use std::collections::HashMap;

@@ -2,6 +2,7 @@
 
 use std::error::Error;
 
+use crate::messaging::{consume_messages, declare_queue, establish_connection};
 use futures_util::stream::StreamExt;
 use lapin::options::{BasicAckOptions, BasicNackOptions};
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         error!("Failed to read AMQP_ADDR environment variable: {:?}", e);
         e
     })?;
+
     let max_retries: u32 = std::env::var("AMQP_RECONNECT_ATTEMPTS")
         .unwrap_or_else(|_| "5".into())
         .parse()
@@ -31,6 +33,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         .parse()
         .unwrap_or(500);
 
+    let channel = establish_connection(&amqp_addr).await?;
     let queue_name = "an_task_queue";
     let consumer_tag = "an_consumer";
 
@@ -58,7 +61,24 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 continue;
             }
         };
+    declare_queue(&channel, queue_name).await?;
 
+    // Start consuming tasks from the queue
+    let mut consumer = consume_messages(&channel, queue_name, "an_consumer").await?;
+
+    info!("An node is running and waiting for tasks...");
+
+    while let Some(result) = consumer.next().await {
+        match result {
+            Ok(delivery) => {
+                match serde_json::from_slice::<TaskMessage>(&delivery.data) {
+                    Ok(task_message) => {
+                        info!("Received task: {:?}", task_message);
+
+                        // Process the task (distribute to Ki nodes or handle locally)
+                        if let Err(e) = process_task(task_message).await {
+                            error!("Failed to process task: {:?}", e);
+                        }
         info!("An node is running and waiting for tasks...");
 
         loop {
