@@ -2,8 +2,9 @@
 
 use std::error::Error;
 
+use crate::messaging::{consume_messages, declare_queue, establish_connection};
 use futures_util::stream::StreamExt;
-use lapin::{options::*, types::FieldTable, Connection, ConnectionProperties};
+use lapin::options::{BasicAckOptions, BasicNackOptions};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
 
@@ -19,40 +20,14 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         error!("Failed to read AMQP_ADDR environment variable: {:?}", e);
         e
     })?;
-    let connection = Connection::connect(&amqp_addr, ConnectionProperties::default()).await.map_err(|e| {
-        error!("Failed to connect to RabbitMQ: {:?}", e);
-        e
-    })?;
-    let channel = connection.create_channel().await.map_err(|e| {
-        error!("Failed to create channel: {:?}", e);
-        e
-    })?;
+    let channel = establish_connection(&amqp_addr).await?;
 
     // Declare the queue for receiving tasks from the principal
     let queue_name = "an_task_queue";
-    channel
-        .queue_declare(
-            queue_name,
-            QueueDeclareOptions::default(),
-            FieldTable::default(),
-        )
-        .await.map_err(|e| {
-            error!("Failed to declare queue: {:?}", e);
-            e
-        })?;
+    declare_queue(&channel, queue_name).await?;
 
     // Start consuming tasks from the queue
-    let mut consumer = channel
-        .basic_consume(
-            queue_name,
-            "an_consumer",
-            BasicConsumeOptions::default(),
-            FieldTable::default(),
-        )
-        .await.map_err(|e| {
-            error!("Failed to start consuming: {:?}", e);
-            e
-        })?;
+    let mut consumer = consume_messages(&channel, queue_name, "an_consumer").await?;
 
     info!("An node is running and waiting for tasks...");
 

@@ -1,6 +1,7 @@
 // principal.rs: Implements the specific responsibilities of the Principal, including role management and global coordination.
+use crate::messaging::{consume_messages, declare_queue, establish_connection, publish_message};
 use futures_util::stream::StreamExt;
-use lapin::{options::*, types::FieldTable, Connection, ConnectionProperties};
+use lapin::options::BasicAckOptions;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tracing::{error, info};
@@ -18,44 +19,14 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         error!("Failed to read AMQP_ADDR environment variable: {:?}", e);
         e
     })?;
-    let connection = Connection::connect(&amqp_addr, ConnectionProperties::default())
-        .await
-        .map_err(|e| {
-            error!("Failed to connect to RabbitMQ: {:?}", e);
-            e
-        })?;
-    let channel = connection.create_channel().await.map_err(|e| {
-        error!("Failed to create channel: {:?}", e);
-        e
-    })?;
+    let channel = establish_connection(&amqp_addr).await?;
 
     // Declare the queue for receiving update requests from An nodes
     let queue_name = "principal_update_queue";
-    channel
-        .queue_declare(
-            queue_name,
-            QueueDeclareOptions::default(),
-            FieldTable::default(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to declare queue: {:?}", e);
-            e
-        })?;
+    declare_queue(&channel, queue_name).await?;
 
     // Start consuming update requests from the queue
-    let mut consumer = channel
-        .basic_consume(
-            queue_name,
-            "principal_consumer",
-            BasicConsumeOptions::default(),
-            FieldTable::default(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to start consuming: {:?}", e);
-            e
-        })?;
+    let mut consumer = consume_messages(&channel, queue_name, "principal_consumer").await?;
 
     info!("Principal node is running and waiting for update requests...");
 
@@ -96,5 +67,30 @@ async fn process_update_request(update: UpdateRequest) -> Result<(), Box<dyn Err
     info!("Processing update request with ID: {}", update.update_id);
 
     // For now, we just log that the update was processed
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn assign_role(
+    node_id: &str,
+    role: &str,
+    channel: &lapin::Channel,
+) -> Result<(), Box<dyn Error>> {
+    let role_assignment = RoleAssignment {
+        node_id: node_id.to_string(),
+        role: role.to_string(),
+    };
+
+    // Serialize the role assignment
+    let payload = serde_json::to_vec(&role_assignment).map_err(|e| {
+        error!("Failed to serialize role assignment: {:?}", e);
+        e
+    })?;
+
+    // Publish the role assignment to the role management queue
+    let role_queue = "role_assignment_queue";
+    publish_message(channel, role_queue, &payload).await?;
+
+    info!("Assigned role '{}' to node '{}'", role, node_id);
     Ok(())
 }

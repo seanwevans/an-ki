@@ -1,7 +1,8 @@
 // ki_node.rs: Manages the Ki node behavior, including fetching inputs, running computations, and sending outputs.
 
+use crate::messaging::{consume_messages, declare_queue, establish_connection, publish_message};
 use futures_util::stream::StreamExt;
-use lapin::{options::*, types::FieldTable, BasicProperties, Connection, ConnectionProperties};
+use lapin::options::BasicAckOptions;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tracing::{error, info};
@@ -24,44 +25,14 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         error!("Failed to read AMQP_ADDR environment variable: {:?}", e);
         e
     })?;
-    let connection = Connection::connect(&amqp_addr, ConnectionProperties::default())
-        .await
-        .map_err(|e| {
-            error!("Failed to connect to RabbitMQ: {:?}", e);
-            e
-        })?;
-    let channel = connection.create_channel().await.map_err(|e| {
-        error!("Failed to create channel: {:?}", e);
-        e
-    })?;
+    let channel = establish_connection(&amqp_addr).await?;
 
     // Declare the queue for receiving tasks from the An node
     let queue_name = "ki_task_queue";
-    channel
-        .queue_declare(
-            queue_name,
-            QueueDeclareOptions::default(),
-            FieldTable::default(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to declare queue: {:?}", e);
-            e
-        })?;
+    declare_queue(&channel, queue_name).await?;
 
     // Start consuming tasks from the queue
-    let mut consumer = channel
-        .basic_consume(
-            queue_name,
-            "ki_consumer",
-            BasicConsumeOptions::default(),
-            FieldTable::default(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to start consuming: {:?}", e);
-            e
-        })?;
+    let mut consumer = consume_messages(&channel, queue_name, "ki_consumer").await?;
 
     info!("Ki node is running and waiting for tasks...");
 
@@ -122,20 +93,7 @@ async fn send_result(
         e
     })?;
 
-    // Publish the result to the An node
-    channel
-        .basic_publish(
-            "",
-            result_queue,
-            BasicPublishOptions::default(),
-            &payload,
-            BasicProperties::default(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to publish result: {:?}", e);
-            e
-        })?;
+    publish_message(channel, result_queue, &payload).await?;
 
     info!("Sent result for task ID: {}", result.task_id);
     Ok(())
