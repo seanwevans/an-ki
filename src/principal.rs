@@ -1,15 +1,10 @@
 // principal.rs: Implements the specific responsibilities of the Principal, including role management and global coordination.
 use futures_util::stream::StreamExt;
-use lapin::{options::*, types::FieldTable, BasicProperties, Connection, ConnectionProperties};
+use lapin::{options::*, types::FieldTable, Connection, ConnectionProperties};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tracing::{error, info};
 
-#[derive(Serialize, Deserialize, Debug)]
-struct RoleAssignment {
-    node_id: String,
-    role: String,
-}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct UpdateRequest {
@@ -101,42 +96,5 @@ async fn process_update_request(update: UpdateRequest) -> Result<(), Box<dyn Err
     info!("Processing update request with ID: {}", update.update_id);
 
     // For now, we just log that the update was processed
-    Ok(())
-}
-
-#[allow(dead_code)]
-pub async fn assign_role(
-    node_id: &str,
-    role: &str,
-    channel: &lapin::Channel,
-) -> Result<(), Box<dyn Error>> {
-    let role_assignment = RoleAssignment {
-        node_id: node_id.to_string(),
-        role: role.to_string(),
-    };
-
-    // Serialize the role assignment
-    let payload = serde_json::to_vec(&role_assignment).map_err(|e| {
-        error!("Failed to serialize role assignment: {:?}", e);
-        e
-    })?;
-
-    // Publish the role assignment to the role management queue
-    let role_queue = "role_assignment_queue";
-    channel
-        .basic_publish(
-            "",
-            role_queue,
-            BasicPublishOptions::default(),
-            &payload,
-            BasicProperties::default(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to publish role assignment: {:?}", e);
-            e
-        })?;
-
-    info!("Assigned role '{}' to node '{}'", role, node_id);
     Ok(())
 }

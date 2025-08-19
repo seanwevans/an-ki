@@ -1,5 +1,4 @@
 // api.rs: Implements REST API endpoints for interacting with the task recovery system.
-#![allow(dead_code)]
 
 use crate::common::Task;
 use crate::task_recovery::TaskRecoveryManager;

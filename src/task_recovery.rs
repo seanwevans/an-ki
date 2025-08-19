@@ -1,5 +1,4 @@
 // task_recovery.rs: Implements task persistence and recovery for robustness.
-#![allow(dead_code)]
 
 use crate::common::Task;
 use std::collections::HashMap;
