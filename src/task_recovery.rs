@@ -2,11 +2,11 @@
 
 use crate::common::Task;
 use std::collections::HashMap;
-use std::error::Error;
-use std::fs::OpenOptions;
-use std::io::{self, Read, Write};
 use std::sync::Arc;
+use tokio::fs::OpenOptions;
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
+use tokio::task;
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -45,24 +45,29 @@ impl TaskRecoveryManager {
         }
     }
 
-    pub async fn recover_tasks(&self) -> Result<(), Box<dyn Error>> {
-        let mut file = match OpenOptions::new().read(true).open(&self.storage_file) {
+    pub async fn recover_tasks(&self) -> io::Result<()> {
+        let mut file = match OpenOptions::new().read(true).open(&self.storage_file).await {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 OpenOptions::new()
                     .write(true)
                     .create(true)
-                    .open(&self.storage_file)?;
+                    .open(&self.storage_file)
+                    .await?;
                 return Ok(());
             }
-            Err(e) => return Err(Box::new(e)),
+            Err(e) => return Err(e),
         };
 
         let mut content = String::new();
-        file.read_to_string(&mut content)?;
+        file.read_to_string(&mut content).await?;
 
         if !content.is_empty() {
-            let recovered_tasks: HashMap<Uuid, Task> = serde_json::from_str(&content)?;
+            let recovered_tasks: HashMap<Uuid, Task> =
+                task::spawn_blocking(move || serde_json::from_str(&content))
+                    .await
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
             let mut tasks = self.tasks.write().await;
             *tasks = recovered_tasks;
             info!("Recovered tasks from storage file.");
@@ -70,15 +75,19 @@ impl TaskRecoveryManager {
         Ok(())
     }
 
-    async fn persist_tasks(&self) -> Result<(), Box<dyn Error>> {
-        let tasks = self.tasks.read().await;
-        let content = serde_json::to_string(&*tasks)?;
+    async fn persist_tasks(&self) -> io::Result<()> {
+        let tasks = self.tasks.read().await.clone();
+        let content = task::spawn_blocking(move || serde_json::to_string(&tasks))
+            .await
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .open(&self.storage_file)?;
-        file.write_all(content.as_bytes())?;
+            .open(&self.storage_file)
+            .await?;
+        file.write_all(content.as_bytes()).await?;
         Ok(())
     }
 }
