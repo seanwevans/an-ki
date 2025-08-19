@@ -6,11 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tracing::{error, info};
 
-#[derive(Serialize, Deserialize, Debug)]
-struct RoleAssignment {
-    node_id: String,
-    role: String,
-}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct UpdateRequest {

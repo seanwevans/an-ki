@@ -1,5 +1,4 @@
 // security.rs: Implements security mechanisms including encryption, decryption, and authentication for nodes.
-#![allow(dead_code)]
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
@@ -124,7 +123,7 @@ pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, Box<d
 #[cfg(test)]
 mod tests {
     use super::{
-        encrypt_message, decrypt_message, generate_token, verify_token, Claims,
+        encrypt_message, decrypt_message, generate_token, verify_token, renew_token, Claims,
     };
 
     #[test]
@@ -150,5 +149,14 @@ mod tests {
         let decrypted_message = decrypt_message(&encrypted_message, key).unwrap();
 
         assert_eq!(decrypted_message, message);
+    }
+
+    #[test]
+    fn test_renew_token() {
+        std::env::set_var("JWT_SECRET_KEY", "test_secret_key");
+        let token = generate_token("node", "role", 1).unwrap();
+        let renewed = renew_token(&token, 60).unwrap();
+        let data = verify_token(&renewed).unwrap();
+        assert_eq!(data.claims.sub, "node");
     }
 }
