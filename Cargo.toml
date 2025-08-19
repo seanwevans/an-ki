@@ -7,6 +7,9 @@ edition = "2021"
 description = "A distributed neural network system with task scheduling, load balancing, and fault tolerance"
 license = "MIT"
 
+[features]
+integration-tests = []
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full", "signal"] }
@@ -59,4 +62,5 @@ lazy_static = "1.4"
 # Testing utilities
 tokio = { version = "1", features = ["full"] }
 warp = "0.3"
+nix = { version = "0.27", features = ["signal"] }
 
