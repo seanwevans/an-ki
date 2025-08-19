@@ -5,7 +5,13 @@ use lapin::options::BasicAckOptions;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tracing::{error, info};
+use crate::config::load_settings;
 
+#[derive(Serialize, Deserialize, Debug)]
+struct RoleAssignment {
+    node_id: String,
+    role: String,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct UpdateRequest {
@@ -14,12 +20,22 @@ struct UpdateRequest {
 }
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
-    // Establish connection to RabbitMQ
-    let amqp_addr = std::env::var("AMQP_ADDR").map_err(|e| {
-        error!("Failed to read AMQP_ADDR environment variable: {:?}", e);
+    // Establish connection to RabbitMQ using configuration settings
+    let settings = load_settings().map_err(|e| {
+        error!("Failed to load settings: {:?}", e);
         e
     })?;
-    let channel = establish_connection(&amqp_addr).await?;
+
+    let connection = Connection::connect(&settings.amqp_addr, ConnectionProperties::default())
+        .await
+        .map_err(|e| {
+            error!("Failed to connect to RabbitMQ: {:?}", e);
+            e
+        })?;
+    let channel = connection.create_channel().await.map_err(|e| {
+        error!("Failed to create channel: {:?}", e);
+        e
+    })?;
 
     // Declare the queue for receiving update requests from An nodes
     let queue_name = "principal_update_queue";

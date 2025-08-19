@@ -11,6 +11,7 @@ use std::error::Error;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};
 
+use crate::config::load_settings;
 use crate::messaging;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -26,6 +27,23 @@ struct ResultMessage {
 }
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
+    // Establish connection to RabbitMQ using configuration settings
+    let settings = load_settings().map_err(|e| {
+        error!("Failed to load settings: {:?}", e);
+        e
+    })?;
+    let connection = Connection::connect(&settings.amqp_addr, ConnectionProperties::default())
+        .await
+        .map_err(|e| {
+            error!("Failed to connect to RabbitMQ: {:?}", e);
+            e
+        })?;
+    let channel = connection.create_channel().await.map_err(|e| {
+        error!("Failed to create channel: {:?}", e);
+        e
+    })?;
+
+    // Declare the queue for receiving tasks from the An node
     // Read configuration values
     let amqp_addr = std::env::var("AMQP_ADDR").map_err(|e| {
         error!("Failed to read AMQP_ADDR environment variable: {:?}", e);
