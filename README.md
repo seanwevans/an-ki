@@ -170,3 +170,20 @@ DELETE /tasks/{task_id}: Delete a specific task by providing the task ID.
 curl -X DELETE http://localhost:3030/tasks/{task_id}
 
 These endpoints allow external interaction with the distributed network, such as adding new tasks or querying the current tasks.
+
+## Development
+
+### Pre-commit Hooks
+
+This project uses [pre-commit](https://pre-commit.com/) to automatically run `cargo fmt` and `cargo clippy` on commits. Install pre-commit and set up the hooks:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+Run all checks manually with:
+
+```bash
+pre-commit run --all-files
+```
