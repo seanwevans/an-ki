@@ -2,17 +2,16 @@
 
 use std::error::Error;
 
-use crate::signals;
-use crate::messaging::{consume_messages, declare_queue, establish_connection};
+use crate::{config::load_settings, messaging, signals};
 use futures_util::stream::StreamExt;
-use lapin::options::{BasicAckOptions, BasicNackOptions};
+use lapin::{
+    options::{BasicAckOptions, BasicNackOptions},
+    Channel, Consumer,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};
-
-use crate::config::load_settings;
-use crate::messaging;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct TaskMessage {
@@ -34,40 +33,11 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         let _ = shutdown_tx.send(());
     });
 
-    // Establish connection to RabbitMQ
-    let amqp_addr = std::env::var("AMQP_ADDR").map_err(|e| {
-        error!("Failed to read AMQP_ADDR environment variable: {:?}", e);
-        e
-    })?;
-    let connection = Connection::connect(&amqp_addr, ConnectionProperties::default())
-        .await
-        .map_err(|e| {
-            error!("Failed to connect to RabbitMQ: {:?}", e);
-            e
-        })?;
-
-
-    // Establish connection to RabbitMQ using configuration settings
     let settings = load_settings().map_err(|e| {
         error!("Failed to load settings: {:?}", e);
         e
     })?;
-    let connection =
-        Connection::connect(&settings.amqp_addr, ConnectionProperties::default())
-            .await
-            .map_err(|e| {
-                error!("Failed to connect to RabbitMQ: {:?}", e);
-                e
-            })?;
-
-    let channel = connection.create_channel().await.map_err(|e| {
-        error!("Failed to create channel: {:?}", e);
-
-    // Read configuration values
-    let amqp_addr = std::env::var("AMQP_ADDR").map_err(|e| {
-        error!("Failed to read AMQP_ADDR environment variable: {:?}", e);
-        e
-    })?;
+    let amqp_addr = settings.amqp_addr;
 
     let max_retries: u32 = std::env::var("AMQP_RECONNECT_ATTEMPTS")
         .unwrap_or_else(|_| "5".into())
@@ -78,145 +48,77 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         .parse()
         .unwrap_or(500);
 
-    let channel = establish_connection(&amqp_addr).await?;
     let queue_name = "an_task_queue";
-
-    channel
-        .queue_declare(
-            queue_name,
-            QueueDeclareOptions::default(),
-            FieldTable::default(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to declare queue: {:?}", e);
-            e
-        })?;
-
-    // Start consuming tasks from the queue
-    let mut consumer = channel
-        .basic_consume(
-            queue_name,
-            "an_consumer",
-            BasicConsumeOptions::default(),
-            FieldTable::default(),
-        )
-        .await
-        .map_err(|e| {
-            error!("Failed to start consuming: {:?}", e);
-            e
-        })?;
-
     let consumer_tag = "an_consumer";
-
     let mut attempts = 0u32;
 
     loop {
-        // Establish connection and consumer using messaging helpers
-        let (_, mut consumer) = match setup_consumer(&amqp_addr, queue_name, consumer_tag).await {
-            Ok(c) => {
-                attempts = 0; // reset attempts after successful connection
-                c
-            }
-            Err(e) => {
-                attempts += 1;
-                error!(
-                    "Failed to establish connection: {:?}. Attempt {}/{}",
-                    e, attempts, max_retries
-                );
-                if attempts >= max_retries {
-                    error!("Exceeded maximum reconnection attempts. Exiting.");
-                    return Err(e);
+        let (_channel, mut consumer) =
+            match setup_consumer(&amqp_addr, queue_name, consumer_tag).await {
+                Ok(c) => {
+                    attempts = 0;
+                    c
                 }
-                let delay = backoff_ms * 2u64.pow(attempts - 1);
-                sleep(Duration::from_millis(delay)).await;
-                continue;
-            }
-        };
-    declare_queue(&channel, queue_name).await?;
-
-    // Start consuming tasks from the queue
-    let mut consumer = consume_messages(&channel, queue_name, "an_consumer").await?;
-    info!("An node is running and waiting for tasks...");
-
-    loop {
-        tokio::select! {
-            _ = &mut shutdown_rx => {
-                info!("Shutdown signal received, stopping An node...");
-                break;
-            }
-            result = consumer.next() => {
-                match result {
-                    Some(Ok(delivery)) => {
-                        match serde_json::from_slice::<TaskMessage>(&delivery.data) {
-                            Ok(task_message) => {
-                                info!("Received task: {:?}", task_message);
-
-
-                                if let Err(e) = process_task(task_message).await {
-                                    error!("Failed to process task: {:?}", e);
-                                }
-
-                                if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
-                                    error!("Failed to acknowledge message: {:?}", e);
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to deserialize task message: {:?}", e);
-                                if let Err(e) = delivery.nack(BasicNackOptions::default()).await {
-                                    error!("Failed to negatively acknowledge message: {:?}", e);
-                                }
-                            }
-                        }
+                Err(e) => {
+                    attempts += 1;
+                    error!(
+                        "Failed to establish connection: {:?}. Attempt {}/{}",
+                        e, attempts, max_retries
+                    );
+                    if attempts >= max_retries {
+                        error!("Exceeded maximum reconnection attempts. Exiting.");
+                        return Err(e);
                     }
-                    Some(Err(e)) => {
-                        error!("Error in consumer: {:?}", e);
-                        // Process the task (distribute to Ki nodes or handle locally)
-                        if let Err(e) = process_task(task_message).await {
-                            error!("Failed to process task: {:?}", e);
-                        }
+                    let delay = backoff_ms * 2u64.pow(attempts - 1);
+                    sleep(Duration::from_millis(delay)).await;
+                    continue;
+                }
+            };
+
         info!("An node is running and waiting for tasks...");
 
         loop {
-            match consumer.next().await {
-                Some(Ok(delivery)) => {
-                    match serde_json::from_slice::<TaskMessage>(&delivery.data) {
-                        Ok(task_message) => {
-                            info!("Received task: {:?}", task_message);
-
-                            // Process the task (distribute to Ki nodes or handle locally)
-                            if let Err(e) = process_task(task_message).await {
-                                error!("Failed to process task: {:?}", e);
-                            }
-
-                            // Acknowledge the message
-                            if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
-                                error!("Failed to acknowledge message: {:?}", e);
+            tokio::select! {
+                _ = &mut shutdown_rx => {
+                    info!("Shutdown signal received, stopping An node...");
+                    return Ok(());
+                }
+                delivery = consumer.next() => {
+                    match delivery {
+                        Some(Ok(delivery)) => {
+                            match serde_json::from_slice::<TaskMessage>(&delivery.data) {
+                                Ok(task_message) => {
+                                    info!("Received task: {:?}", task_message);
+                                    if let Err(e) = process_task(task_message).await {
+                                        error!("Failed to process task: {:?}", e);
+                                    }
+                                    if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
+                                        error!("Failed to acknowledge message: {:?}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to deserialize task message: {:?}", e);
+                                    if let Err(e) = delivery.nack(BasicNackOptions::default()).await {
+                                        error!("Failed to negatively acknowledge message: {:?}", e);
+                                    }
+                                }
                             }
                         }
-                        Err(e) => {
-                            error!("Failed to deserialize task message: {:?}", e);
-                            if let Err(e) = delivery.nack(BasicNackOptions::default()).await {
-                                error!("Failed to negatively acknowledge message: {:?}", e);
-                            }
+                        Some(Err(e)) => {
+                            error!("Error in consumer stream: {:?}", e);
+                            break;
+                        }
+                        None => {
+                            error!("Consumer stream closed");
+                            break;
                         }
                     }
-                    None => break,
-                }
-                Some(Err(e)) => {
-                    error!("Error in consumer stream: {:?}", e);
-                    break;
-                }
-                None => {
-                    error!("Consumer stream closed");
-                    break;
                 }
             }
         }
 
-        // If we reach here, consumer encountered an error or closed; retry connection
         attempts += 1;
-        if attempts > max_retries {
+        if attempts >= max_retries {
             error!("Failed to reconnect after {} attempts", max_retries);
             return Err("reconnection attempts exceeded".into());
         }
@@ -225,21 +127,11 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     }
 }
 
-
-    if let Err(e) = channel.close(200, "Bye").await {
-        error!("Failed to close channel: {:?}", e);
-    }
-    if let Err(e) = connection.close(200, "Bye").await {
-        error!("Failed to close connection: {:?}", e);
-    }
-
-    Ok(())
-
 async fn setup_consumer(
     amqp_addr: &str,
     queue_name: &str,
     consumer_tag: &str,
-) -> Result<(lapin::Channel, lapin::Consumer), Box<dyn Error>> {
+) -> Result<(Channel, Consumer), Box<dyn Error>> {
     let channel = messaging::establish_connection(amqp_addr).await?;
     messaging::declare_queue(&channel, queue_name).await?;
     let consumer = messaging::consume_messages(&channel, queue_name, consumer_tag).await?;
@@ -247,10 +139,57 @@ async fn setup_consumer(
 }
 
 async fn process_task(task: TaskMessage) -> Result<(), Box<dyn Error>> {
-    // Placeholder for task processing logic
-    // This is where you would distribute tasks to Ki nodes or handle them locally
     info!("Processing task with ID: {}", task.task_id);
-
-    // For now, we just log that the task is processed
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{timeout, Duration};
+
+    #[tokio::test]
+    async fn test_process_task_ok() {
+        let task = TaskMessage {
+            task_id: "1".into(),
+            data: "data".into(),
+        };
+        assert!(process_task(task).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_setup_consumer_failure() {
+        let result = setup_consumer("amqp://invalid:5672/%2f", "test_queue", "test_tag").await;
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "integration-tests")]
+    use crate::messaging;
+    #[cfg(feature = "integration-tests")]
+    use futures_util::StreamExt;
+    #[cfg(feature = "integration-tests")]
+    use lapin::options::BasicAckOptions;
+    #[cfg(feature = "integration-tests")]
+    const AMQP_ADDR: &str = "amqp://127.0.0.1:5672/%2f";
+
+    #[cfg(feature = "integration-tests")]
+    #[tokio::test]
+    async fn test_setup_consumer_workflow() {
+        let (channel, mut consumer) = setup_consumer(AMQP_ADDR, "test_queue", "test_consumer")
+            .await
+            .expect("setup");
+
+        messaging::publish_message(&channel, "test_queue", b"hello")
+            .await
+            .expect("publish");
+
+        let delivery = timeout(Duration::from_secs(5), consumer.next())
+            .await
+            .expect("timeout")
+            .expect("consumer closed")
+            .expect("delivery error");
+
+        assert_eq!(delivery.data, b"hello");
+        delivery.ack(BasicAckOptions::default()).await.expect("ack");
+    }
 }
