@@ -22,6 +22,7 @@ warp = "0.3"
 tokio-postgres = "0.7"
 futures-util = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
+# Base64 encoding/decoding
 base64 = "0.21"
 bb8 = "0.9"
 bb8-postgres = "0.9"
@@ -52,15 +53,11 @@ hmac = "0.12"
 sha2 = "0.10"
 aes-gcm = { version = "0.10", features = ["std"] }
 rand = "0.8"
-
-# Base64 encoding/decoding
-
 # Testing framework for lazy static initialization
 lazy_static = "1.4"
 
 [dev-dependencies]
 # Testing utilities
 tokio = { version = "1", features = ["full"] }
-warp = "0.3"
 nix = { version = "0.27", features = ["signal"] }
 
