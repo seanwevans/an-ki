@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use prometheus::{register_counter, register_histogram, Counter, Encoder, Histogram, TextEncoder};
 use std::convert::Infallible;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, warn, Level};
+use tracing::{debug, error, info};
 use tracing_subscriber::{fmt, EnvFilter};
 use warp::Filter;
 
