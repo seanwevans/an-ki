@@ -42,10 +42,10 @@ impl Dht {
         nodes.get(node_id).cloned()
     }
 
-pub async fn list_nodes(&self) -> Vec<NodeInfo> {
-    let nodes = self.nodes.read().await;
-    nodes.values().cloned().collect()
-}
+    pub async fn list_nodes(&self) -> Vec<NodeInfo> {
+        let nodes = self.nodes.read().await;
+        nodes.values().cloned().collect()
+    }
 }
 
 #[cfg(test)]
