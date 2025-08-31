@@ -8,6 +8,10 @@ use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, TokenData, 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use ring::rand::SystemRandom;
+use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
+use webpki::{EndEntityCert, TrustAnchor, Time, ECDSA_P256_SHA256};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::env;
 use std::error::Error;
@@ -120,11 +124,47 @@ pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, Box<d
     Ok(decrypted_message)
 }
 
+/// Validates `cert_der` against the provided CA certificate `ca_der`.
+pub fn validate_certificate(cert_der: &[u8], ca_der: &[u8]) -> Result<(), Box<dyn Error>> {
+    let anchor = TrustAnchor::try_from_cert_der(ca_der).map_err(|e| e.to_string())?;
+    let anchors = [anchor];
+    let trust_anchors = webpki::TlsServerTrustAnchors(&anchors);
+    let cert = EndEntityCert::try_from(cert_der).map_err(|e| e.to_string())?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?;
+    cert.verify_is_valid_tls_server_cert(&[&ECDSA_P256_SHA256], &trust_anchors, &[], Time::from_seconds_since_unix_epoch(now.as_secs()))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Generates a random challenge to be signed by a peer.
+pub fn generate_challenge() -> [u8; 32] {
+    let mut challenge = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut challenge);
+    challenge
+}
+
+/// Signs the `challenge` using the node's private key in DER format.
+pub fn sign_challenge(challenge: &[u8], key_der: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
+    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, key_der)?;
+    let sig = key_pair.sign(&SystemRandom::new(), challenge)?;
+    Ok(sig.as_ref().to_vec())
+}
+
+/// Verifies a signed challenge using the peer's certificate DER bytes.
+pub fn verify_challenge(challenge: &[u8], signature: &[u8], cert_der: &[u8]) -> Result<(), Box<dyn Error>> {
+    let cert = EndEntityCert::try_from(cert_der).map_err(|e| e.to_string())?;
+    cert.verify_signature(&ECDSA_P256_SHA256, challenge, signature)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         encrypt_message, decrypt_message, generate_token, verify_token, renew_token, Claims,
+        validate_certificate, generate_challenge, sign_challenge, verify_challenge,
     };
+    use rcgen::{Certificate as RcCertificate, CertificateParams, IsCa, BasicConstraints, ExtendedKeyUsagePurpose};
 
     #[test]
     fn test_generate_and_verify_token() {
@@ -158,5 +198,32 @@ mod tests {
         let renewed = renew_token(&token, 60).unwrap();
         let data = verify_token(&renewed).unwrap();
         assert_eq!(data.claims.sub, "node");
+    }
+
+    #[test]
+    fn test_certificate_validation_and_challenge() {
+        // Generate a CA certificate
+        let mut ca_params = CertificateParams::new(vec!["ca".into()]);
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca = RcCertificate::from_params(ca_params).unwrap();
+        let ca_der = ca.serialize_der().unwrap();
+
+        // Generate node certificate signed by CA
+        let mut node_params = CertificateParams::new(vec!["node".into()]);
+        node_params.extended_key_usages = vec![
+            ExtendedKeyUsagePurpose::ServerAuth,
+            ExtendedKeyUsagePurpose::ClientAuth,
+        ];
+        let node = RcCertificate::from_params(node_params).unwrap();
+        let node_der = node.serialize_der_with_signer(&ca).unwrap();
+
+        // Validate
+        validate_certificate(&node_der, &ca_der).unwrap();
+
+        // Challenge-response
+        let challenge = generate_challenge();
+        let key_der = node.serialize_private_key_der();
+        let sig = sign_challenge(&challenge, &key_der).unwrap();
+        verify_challenge(&challenge, &sig, &node_der).unwrap();
     }
 }

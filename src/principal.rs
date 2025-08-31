@@ -1,9 +1,9 @@
 // principal.rs: Implements the specific responsibilities of the Principal, including role management and global coordination.
 
+use std::error::Error;
 use crate::messaging::{consume_messages, declare_queue, publish_message};
 use crate::signals;
-use lapin::{Connection, ConnectionProperties};
-
+use lapin::{Channel, Connection, ConnectionProperties};
 use crate::config::load_settings;
 use futures_util::stream::StreamExt;
 use lapin::options::BasicAckOptions;
@@ -23,6 +23,8 @@ struct UpdateRequest {
     update_id: String,
     content: String,
 }
+
+
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
     #[cfg(unix)]
@@ -114,9 +116,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 async fn process_update_request(update: UpdateRequest) -> Result<(), Box<dyn Error>> {
     // Placeholder for update request approval logic
     // Validate the update and apply it to the master database if approved
-    info!("Processing update request with ID: {}", update.update_id);
-
-    // For now, we just log that the update was processed
+    info!("Processing update request with ID: {}", update.update_id);    
     Ok(())
 }
 
@@ -124,23 +124,8 @@ async fn process_update_request(update: UpdateRequest) -> Result<(), Box<dyn Err
 pub async fn assign_role(
     node_id: &str,
     role: &str,
-    channel: &lapin::Channel,
+    _channel: &Channel,
 ) -> Result<(), Box<dyn Error>> {
-    let role_assignment = RoleAssignment {
-        node_id: node_id.to_string(),
-        role: role.to_string(),
-    };
-
-    // Serialize the role assignment
-    let payload = serde_json::to_vec(&role_assignment).map_err(|e| {
-        error!("Failed to serialize role assignment: {:?}", e);
-        e
-    })?;
-
-    // Publish the role assignment to the role management queue
-    let role_queue = "role_assignment_queue";
-    publish_message(channel, role_queue, &payload).await?;
-
     info!("Assigned role '{}' to node '{}'", role, node_id);
     Ok(())
 }
