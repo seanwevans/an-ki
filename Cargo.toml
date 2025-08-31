@@ -19,7 +19,7 @@ lapin = "2.0"
 
 # Web framework for REST API
 warp = "0.3"
-tokio-postgres = "0.7"
+tokio-postgres = { version = "0.7", features = ["with-uuid-1"] }
 futures-util = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 # Base64 encoding/decoding

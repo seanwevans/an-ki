@@ -1,26 +1,24 @@
 // task_recovery.rs: Implements task persistence and recovery for robustness.
 
 use crate::common::Task;
+use crate::database::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::fs::OpenOptions;
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
-use tokio::task;
 use tracing::{error, info};
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct TaskRecoveryManager {
     pub tasks: Arc<RwLock<HashMap<Uuid, Task>>>,
-    pub storage_file: String,
+    pub pool: PgPool,
 }
 
 impl TaskRecoveryManager {
-    pub fn new(storage_file: &str) -> Self {
+    pub fn new(pool: PgPool) -> Self {
         TaskRecoveryManager {
             tasks: Arc::new(RwLock::new(HashMap::new())),
-            storage_file: storage_file.to_string(),
+            pool,
         }
     }
 
@@ -28,8 +26,20 @@ impl TaskRecoveryManager {
         let mut tasks = self.tasks.write().await;
         tasks.insert(task.task_id, task.clone());
         info!("Added task to recovery manager: {:?}", task);
-        if let Err(e) = self.persist_tasks().await {
-            error!("Failed to persist tasks: {:?}", e);
+
+        match self.pool.get().await {
+            Ok(conn) => {
+                if let Err(e) = conn
+                    .execute(
+                        "UPSERT INTO tasks (task_id, data) VALUES ($1, $2)",
+                        &[&task.task_id, &task.data],
+                    )
+                    .await
+                {
+                    error!("Failed to persist task: {:?}", e);
+                }
+            }
+            Err(e) => error!("Failed to acquire connection: {:?}", e),
         }
     }
 
@@ -37,57 +47,33 @@ impl TaskRecoveryManager {
         let mut tasks = self.tasks.write().await;
         if tasks.remove(task_id).is_some() {
             info!("Removed task from recovery manager: {}", task_id);
-            if let Err(e) = self.persist_tasks().await {
-                error!("Failed to persist tasks: {:?}", e);
+            match self.pool.get().await {
+                Ok(conn) => {
+                    if let Err(e) = conn
+                        .execute("DELETE FROM tasks WHERE task_id = $1", &[task_id])
+                        .await
+                    {
+                        error!("Failed to remove task from database: {:?}", e);
+                    }
+                }
+                Err(e) => error!("Failed to acquire connection: {:?}", e),
             }
         } else {
             error!("Task not found for removal: {}", task_id);
         }
     }
 
-    pub async fn recover_tasks(&self) -> io::Result<()> {
-        let mut file = match OpenOptions::new().read(true).open(&self.storage_file).await {
-            Ok(f) => f,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .open(&self.storage_file)
-                    .await?;
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        };
-
-        let mut content = String::new();
-        file.read_to_string(&mut content).await?;
-
-        if !content.is_empty() {
-            let recovered_tasks: HashMap<Uuid, Task> =
-                task::spawn_blocking(move || serde_json::from_str(&content))
-                    .await
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-            let mut tasks = self.tasks.write().await;
-            *tasks = recovered_tasks;
-            info!("Recovered tasks from storage file.");
+    pub async fn recover_tasks(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let conn = self.pool.get().await?;
+        let rows = conn.query("SELECT task_id, data FROM tasks", &[]).await?;
+        let mut tasks = self.tasks.write().await;
+        tasks.clear();
+        for row in rows {
+            let task_id: Uuid = row.get("task_id");
+            let data: String = row.get("data");
+            tasks.insert(task_id, Task { task_id, data });
         }
-        Ok(())
-    }
-
-    async fn persist_tasks(&self) -> io::Result<()> {
-        let tasks = self.tasks.read().await.clone();
-        let content = task::spawn_blocking(move || serde_json::to_string(&tasks))
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&self.storage_file)
-            .await?;
-        file.write_all(content.as_bytes()).await?;
+        info!("Recovered tasks from database.");
         Ok(())
     }
 }
@@ -95,12 +81,12 @@ impl TaskRecoveryManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use crate::database::get_pool;
 
     #[tokio::test]
     async fn test_task_recovery() {
-        let storage_file = "test_tasks.json";
-        let recovery_manager = TaskRecoveryManager::new(storage_file);
+        let pool = get_pool().await.expect("pool");
+        let recovery_manager = TaskRecoveryManager::new(pool.clone());
 
         let task = Task {
             task_id: Uuid::new_v4(),
@@ -110,31 +96,36 @@ mod tests {
         recovery_manager.add_task(task.clone()).await;
         recovery_manager.remove_task(&task.task_id).await;
 
-        // Recover tasks from file
+        // Recover tasks from database
         recovery_manager.add_task(task.clone()).await;
-        recovery_manager.persist_tasks().await.unwrap();
-        let new_recovery_manager = TaskRecoveryManager::new(storage_file);
-        new_recovery_manager.recover_tasks().await.unwrap();
-        assert!(new_recovery_manager
+        recovery_manager.recover_tasks().await.unwrap();
+        assert!(recovery_manager
             .tasks
             .read()
             .await
             .contains_key(&task.task_id));
 
-        // Clean up test file
-        fs::remove_file(storage_file).unwrap();
+        // Clean up
+        pool.get()
+            .await
+            .unwrap()
+            .execute("DELETE FROM tasks WHERE task_id = $1", &[&task.task_id])
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn test_recover_tasks_file_absent() {
-        let storage_file = "missing_tasks.json";
-        if fs::metadata(storage_file).is_ok() {
-            fs::remove_file(storage_file).unwrap();
-        }
-        let recovery_manager = TaskRecoveryManager::new(storage_file);
+        let pool = get_pool().await.expect("pool");
+        // Ensure table is empty
+        pool.get()
+            .await
+            .unwrap()
+            .execute("DELETE FROM tasks", &[])
+            .await
+            .unwrap();
+        let recovery_manager = TaskRecoveryManager::new(pool);
         assert!(recovery_manager.recover_tasks().await.is_ok());
-        assert!(fs::metadata(storage_file).is_ok());
         assert!(recovery_manager.tasks.read().await.is_empty());
-        fs::remove_file(storage_file).unwrap();
     }
 }

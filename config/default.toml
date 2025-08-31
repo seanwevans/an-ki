@@ -3,4 +3,6 @@
 
 amqp_addr = "amqp://127.0.0.1:5672/%2f"
 jwt_secret_key = "<JWT_SECRET_KEY>"
-database_url = "postgresql://root@localhost:26257/defaultdb?sslmode=disable"
+# Multi-region connection string; the client will balance between the listed
+# nodes for failover.
+database_url = "postgresql://root@localhost:26257,localhost:26258,localhost:26259/defaultdb?sslmode=disable"
