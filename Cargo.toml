@@ -53,6 +53,15 @@ hmac = "0.12"
 sha2 = "0.10"
 aes-gcm = { version = "0.10", features = ["std"] }
 rand = "0.8"
+# TLS and PKI
+rcgen = { version = "0.11", features = ["pem", "x509-parser"] }
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
+tokio-rustls = "0.24"
+webpki = "0.22"
+ring = "0.16"
+rustls-pemfile = "1.0"
+# CLI tooling
+clap = { version = "4.4", features = ["derive"] }
 # Testing framework for lazy static initialization
 lazy_static = "1.4"
 openraft = { version = "0.9", features = ["serde", "type-alias"] }
