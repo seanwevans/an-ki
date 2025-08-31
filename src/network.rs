@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use tokio_rustls::{
     rustls::{ClientConfig, ServerName},
     TlsConnector,
@@ -33,6 +33,8 @@ impl NetworkManager {
         domain: &str,
         retry_count: u32,
         timeout_duration: Duration,
+        base_delay: Duration,
+        max_backoff: Duration,
     ) -> Result<(), Box<dyn Error>> {
         for attempt in 0..retry_count {
             let connector = TlsConnector::from(self.tls_config.clone());
@@ -66,6 +68,12 @@ impl NetworkManager {
                         retry_count
                     );
                 }
+            }
+
+            if attempt + 1 < retry_count {
+                let exp_delay = base_delay.checked_mul(1 << attempt).unwrap_or(max_backoff);
+                let delay = std::cmp::min(exp_delay, max_backoff);
+                sleep(delay).await;
             }
         }
         Err("Failed to connect after retries".into())
@@ -165,14 +173,28 @@ mod tests {
 
         // Successful connection while listener is active
         let result = network_manager
-            .connect_to_node(test_address, "localhost", 3, Duration::from_secs(3))
+            .connect_to_node(
+                test_address,
+                "localhost",
+                3,
+                Duration::from_secs(3),
+                Duration::from_millis(10),
+                Duration::from_millis(80),
+            )
             .await;
         assert!(result.is_ok());
 
         // Drop listener and ensure connection now fails
         // No server running on same address
         let result = network_manager
-            .connect_to_node(test_address, "localhost", 1, Duration::from_secs(1))
+            .connect_to_node(
+                test_address,
+                "localhost",
+                1,
+                Duration::from_secs(1),
+                Duration::from_millis(10),
+                Duration::from_millis(80),
+            )
             .await;
         assert!(result.is_err());
     }
