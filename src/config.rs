@@ -11,6 +11,8 @@ pub struct Settings {
     pub amqp_addr: String,
     pub jwt_secret_key: String,
     pub database_url: String,
+    /// OTLP endpoint for exporting traces.
+    pub otlp_endpoint: Option<String>,
     /// Number of model shards expected when aggregating gradients.
     pub model_shards: usize,
     /// Number of training epochs the scheduler should execute.
@@ -40,6 +42,7 @@ impl Settings {
         override_from_env_or_file(&mut s, "amqp_addr", "AMQP_ADDR")?;
         override_from_env_or_file(&mut s, "jwt_secret_key", "JWT_SECRET_KEY")?;
         override_from_env_or_file(&mut s, "database_url", "DATABASE_URL")?;
+        override_from_env_or_file(&mut s, "otlp_endpoint", "OTLP_ENDPOINT")?;
 
         s.try_into()
     }
@@ -75,6 +78,7 @@ mod tests {
         assert!(!settings.amqp_addr.is_empty());
         assert!(!settings.jwt_secret_key.is_empty());
         assert!(!settings.database_url.is_empty());
+        assert!(settings.otlp_endpoint.is_some());
         assert!(settings.model_shards > 0);
         assert!(settings.training_epochs > 0);
     }
