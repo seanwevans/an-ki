@@ -9,6 +9,7 @@ use prometheus::{
     TextEncoder,
 };
 use std::convert::Infallible;
+use std::env;
 use std::time::Instant;
 use tracing::{debug, info};
 use tracing_opentelemetry::OpenTelemetryLayer;
@@ -38,9 +39,15 @@ lazy_static! {
 }
 
 pub fn init_logging() {
+    let endpoint = crate::config::load_settings()
+        .ok()
+        .and_then(|s| s.otlp_endpoint)
+        .or_else(|| env::var("OTLP_ENDPOINT").ok())
+        .unwrap_or_else(|| "http://localhost:4317".to_string());
+
     let exporter = SpanExporter::builder()
         .with_tonic()
-        .with_endpoint("http://localhost:4317")
+        .with_endpoint(endpoint)
         .build()
         .expect("failed to create OTLP exporter");
 

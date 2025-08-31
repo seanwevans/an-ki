@@ -114,8 +114,10 @@ export DATABASE_URL="postgresql://root@localhost:26257/defaultdb?sslmode=disable
    mkdir -p config
    cp config/default.example config/default.toml
    ```
-   Edit `config/default.toml` to set values for `amqp_addr`, `jwt_secret_key`, and `database_url`.
-   You can also supply the JWT secret via the `JWT_SECRET_KEY` environment variable if preferred.
+   Edit `config/default.toml` to set values for `amqp_addr`, `jwt_secret_key`, `database_url`,
+   and optionally `otlp_endpoint` to point to your OpenTelemetry collector
+   (default is `http://localhost:4317`). You can also supply the JWT secret via the
+   `JWT_SECRET_KEY` environment variable and the OTLP endpoint via `OTLP_ENDPOINT` if preferred.
 
 5. **Build the project:**
    Compile the project to ensure there are no issues.
@@ -239,8 +241,9 @@ docker run --rm -p 4317:4317 -p 9464:9464 \
   --config /etc/otel-collector-config.yaml
 ```
 
-Nodes export traces to the collector via OTLP on port `4317` and expose Prometheus metrics on port `9090`. The collector
-scrapes these metrics and re-exports them on `9464` for federation.
+Nodes export traces to the collector via OTLP on port `4317` (configurable via the
+`otlp_endpoint` setting or `OTLP_ENDPOINT` environment variable) and expose Prometheus metrics on port `9090`.
+The collector scrapes these metrics and re-exports them on `9464` for federation.
 
 ### Grafana Dashboard
 
