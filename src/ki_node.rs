@@ -90,10 +90,15 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
                             info!("Received task: {:?}", task_message);
 
-                            let result = perform_computation(task_message).await;
-
-                            if let Err(e) = send_result(result, &channel).await {
-                                error!("Failed to send result: {:?}", e);
+                            match perform_computation(task_message).await {
+                                Ok(result) => {
+                                    if let Err(e) = send_result(result, &channel).await {
+                                        error!("Failed to send result: {:?}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Computation failed: {:?}", e);
+                                }
                             }
 
                             if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
@@ -135,24 +140,39 @@ async fn setup_consumer(
     Ok((channel, consumer))
 }
 
-async fn perform_computation(task: Task) -> Task {
-    #[cfg(feature = "tch")]
-    {
-        info!("Performing computation for task ID: {}", task.task_id);
-        let input: Vec<f32> = serde_json::from_str(&task.data).unwrap_or_default();
-        let tensor = Tensor::of_slice(&input);
-        let grad_tensor = &tensor * 2.0;
-        let grad: Vec<f32> = Vec::<f32>::from(grad_tensor);
-        let data = serde_json::to_string(&grad).unwrap_or_default();
-        Task { task_id: task.task_id, task_type: TaskType::GradientUpdate, data }
-    }
-    #[cfg(not(feature = "tch"))]
-    {
-        info!("Performing computation for task ID: {}", task.task_id);
-        Task {
-            task_id: task.task_id,
-            task_type: TaskType::GradientUpdate,
-            data: format!("Processed data: {}", task.data),
+async fn perform_computation(task: Task) -> Result<Task, Box<dyn Error>> {
+    match task.task_type {
+        TaskType::GradientUpdate => {
+            info!("Performing computation for task ID: {}", task.task_id);
+            #[cfg(feature = "tch")]
+            {
+                let input: Vec<f32> = serde_json::from_str(&task.data)?;
+                let tensor = Tensor::of_slice(&input);
+                let grad_tensor = &tensor * 2.0;
+                let grad: Vec<f32> = Vec::<f32>::from(grad_tensor);
+                let data = serde_json::to_string(&grad)?;
+                Ok(Task {
+                    task_id: task.task_id,
+                    task_type: TaskType::GradientUpdate,
+                    data,
+                })
+            }
+            #[cfg(not(feature = "tch"))]
+            {
+                Ok(Task {
+                    task_id: task.task_id,
+                    task_type: TaskType::GradientUpdate,
+                    data: format!("Processed data: {}", task.data),
+                })
+            }
+        }
+        TaskType::ParameterPull => {
+            info!("Received parameter pull task ID: {}", task.task_id);
+            Ok(Task {
+                task_id: task.task_id,
+                task_type: TaskType::ParameterPull,
+                data: task.data,
+            })
         }
     }
 }
@@ -178,6 +198,18 @@ mod tests {
     async fn test_setup_consumer_failure() {
         let result = setup_consumer("amqp://invalid:5672/%2f", "queue", "tag").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_perform_computation_parameter_pull() {
+        let task = Task {
+            task_id: uuid::Uuid::new_v4(),
+            task_type: TaskType::ParameterPull,
+            data: String::new(),
+        };
+        let result = perform_computation(task.clone()).await.unwrap();
+        assert_eq!(result.task_type, TaskType::ParameterPull);
+        assert_eq!(result.task_id, task.task_id);
     }
 
     #[cfg(feature = "integration-tests")]
