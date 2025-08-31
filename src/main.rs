@@ -11,6 +11,7 @@ mod config;
 mod dht;
 mod ki_node;
 mod load_balancer;
+mod logging_metrics;
 mod messaging;
 mod node_registry;
 mod principal;
@@ -20,8 +21,9 @@ mod task_recovery;
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing subscriber for logging
-    tracing_subscriber::fmt::init();
+    // Initialize tracing and metrics
+    logging_metrics::init_logging();
+    let _ = tokio::spawn(logging_metrics::run_metrics_server());
 
     // Determine the node type based on an environment variable or command-line argument
     let args: Vec<String> = env::args().collect();
@@ -34,18 +36,21 @@ async fn main() {
 
     match node_type.as_str() {
         "principal" => {
+            logging_metrics::set_consensus_state(1.0);
             if let Err(e) = principal::run().await {
                 error!("Failed to run principal node: {:?}", e);
                 std::process::exit(1);
             }
         }
         "an" => {
+            logging_metrics::set_consensus_state(0.0);
             if let Err(e) = an_node::run().await {
                 error!("Failed to run an node: {:?}", e);
                 std::process::exit(1);
             }
         }
         "ki" => {
+            logging_metrics::set_consensus_state(0.0);
             if let Err(e) = ki_node::run().await {
                 error!("Failed to run ki node: {:?}", e);
                 std::process::exit(1);

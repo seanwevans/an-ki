@@ -17,6 +17,12 @@ pub struct NetworkManager {
     tls_config: Arc<ClientConfig>,
 }
 
+impl Default for NetworkManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NetworkManager {
     pub fn new(tls_config: ClientConfig) -> Self {
         NetworkManager {

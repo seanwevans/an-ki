@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 30,
+  "title": "Node Overview",
+  "version": 1,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Node Status",
+      "datasource": "Prometheus",
+      "targets": [{"expr": "node_status"}],
+      "gridPos": {"x": 0, "y": 0, "w": 8, "h": 4}
+    },
+    {
+      "type": "graph",
+      "title": "Consensus State",
+      "datasource": "Prometheus",
+      "targets": [{"expr": "consensus_state"}],
+      "gridPos": {"x": 8, "y": 0, "w": 8, "h": 6}
+    },
+    {
+      "type": "graph",
+      "title": "Task Throughput",
+      "datasource": "Prometheus",
+      "targets": [{"expr": "rate(tasks_processed_total[1m])"}],
+      "gridPos": {"x": 0, "y": 4, "w": 16, "h": 8}
+    }
+  ]
+}
