@@ -187,3 +187,30 @@ Run all checks manually with:
 ```bash
 pre-commit run --all-files
 ```
+
+## Monitoring
+
+### OpenTelemetry Collector
+
+An OpenTelemetry Collector can aggregate metrics and traces from regional nodes. A sample configuration is available at
+`config/otel-collector-config.yaml`. Run the collector with Docker:
+
+```bash
+docker run --rm -p 4317:4317 -p 9464:9464 \
+  -v $(pwd)/config/otel-collector-config.yaml:/etc/otel-collector-config.yaml \
+  otel/opentelemetry-collector:latest \
+  --config /etc/otel-collector-config.yaml
+```
+
+Nodes export traces to the collector via OTLP on port `4317` and expose Prometheus metrics on port `9090`. The collector
+scrapes these metrics and re-exports them on `9464` for federation.
+
+### Grafana Dashboard
+
+Import the sample dashboard found at `config/grafana/node_overview.json` into Grafana. It visualizes:
+
+- **Node Status:** current health of each node.
+- **Consensus State:** leader or follower role.
+- **Task Throughput:** rate of tasks processed per minute.
+
+Configure Grafana to use the collector's Prometheus exporter (`http://localhost:9464`) as a data source.

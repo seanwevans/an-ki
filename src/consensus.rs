@@ -1,12 +1,13 @@
 // consensus.rs: Implements a consensus algorithm to ensure consistency across An nodes.
 
+use crate::logging_metrics;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, RwLock};
+use tracing::{error, info};
 use uuid::Uuid;
-use tracing::{info, error};
-use std::error::Error;
-use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConsensusProposal {
@@ -40,7 +41,10 @@ impl ConsensusState {
         let mut votes = self.votes.write().await;
         if let Some(vote_count) = votes.get_mut(&proposal_id) {
             *vote_count += 1;
-            info!("Cast vote for proposal: {}. Current votes: {}", proposal_id, *vote_count);
+            info!(
+                "Cast vote for proposal: {}. Current votes: {}",
+                proposal_id, *vote_count
+            );
         } else {
             error!("Proposal not found: {}", proposal_id);
         }
@@ -71,6 +75,7 @@ pub async fn run_consensus_protocol(
                 consensus_state.cast_vote(proposal_id).await;
                 if consensus_state.has_consensus(proposal_id, consensus_threshold).await {
                     info!("Consensus reached for proposal: {}", proposal_id);
+                    logging_metrics::set_consensus_state(1.0);
                     // Handle the proposal that reached consensus (e.g., apply an update to the database)
                 }
             }

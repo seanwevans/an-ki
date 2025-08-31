@@ -1,11 +1,19 @@
 // logging_metrics.rs: Implements logging and metrics collection for monitoring node health and performance.
 
 use lazy_static::lazy_static;
-use prometheus::{register_counter, register_histogram, Counter, Encoder, Histogram, TextEncoder};
+use opentelemetry::{global, trace::TracerProvider as _};
+use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+use opentelemetry_sdk::trace::{BatchSpanProcessor, SdkTracerProvider};
+use prometheus::{
+    register_counter, register_gauge, register_histogram, Counter, Encoder, Gauge, Histogram,
+    TextEncoder,
+};
 use std::convert::Infallible;
-use std::time::{Duration, Instant};
-use tracing::{debug, error, info};
-use tracing_subscriber::{fmt, EnvFilter};
+use std::time::Instant;
+use tracing::{debug, info};
+use tracing_opentelemetry::OpenTelemetryLayer;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{fmt, layer::SubscriberExt, EnvFilter, Registry};
 use warp::Filter;
 
 // Metrics definitions
@@ -20,14 +28,48 @@ lazy_static! {
         "Histogram of task processing times"
     )
     .unwrap();
+    static ref NODE_STATUS: Gauge =
+        register_gauge!("node_status", "Current status of the node (1=up, 0=down)").unwrap();
+    static ref CONSENSUS_STATE: Gauge = register_gauge!(
+        "consensus_state",
+        "Consensus state of the node (1=leader, 0=follower)"
+    )
+    .unwrap();
 }
 
 pub fn init_logging() {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_level(true)
+    let exporter = SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint("http://localhost:4317")
+        .build()
+        .expect("failed to create OTLP exporter");
+
+    let processor = BatchSpanProcessor::builder(exporter).build();
+    let provider = SdkTracerProvider::builder()
+        .with_span_processor(processor)
+        .build();
+
+    let tracer = provider.tracer("an-ki");
+    let otel_layer = OpenTelemetryLayer::new(tracer);
+
+    global::set_tracer_provider(provider);
+
+    Registry::default()
+        .with(fmt::layer().with_target(false))
+        .with(EnvFilter::from_default_env())
+        .with(otel_layer)
         .init();
+
+    set_node_status(1.0);
     info!("Logging initialized.");
+}
+
+pub fn set_node_status(status: f64) {
+    NODE_STATUS.set(status);
+}
+
+pub fn set_consensus_state(state: f64) {
+    CONSENSUS_STATE.set(state);
 }
 
 pub fn log_task_processing(start_time: Instant) {
@@ -67,6 +109,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics_endpoint() {
+        use warp::Reply;
         let response = metrics_endpoint().await.unwrap();
         assert!(response.into_response().status().is_success());
     }
