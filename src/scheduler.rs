@@ -1,7 +1,7 @@
 // scheduler.rs: Implements a task scheduler that assigns tasks to Ki nodes based on load and capacity.
 
 use crate::load_balancer::LoadBalancer;
-use crate::common::Task;
+use crate::common::{Task, TaskType};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use tracing::{info, error};
@@ -9,16 +9,29 @@ use std::time::Duration;
 use tokio::time;
 use std::error::Error;
 
+/// Specifies how the training tasks should be coordinated across nodes.
+#[derive(Clone, Copy)]
+pub enum TrainingMode {
+    /// A central parameter server collects gradients and distributes updated parameters.
+    ParameterServer,
+    /// Nodes perform an all-reduce operation to share gradients amongst themselves.
+    AllReduce,
+}
+
 pub struct Scheduler {
     load_balancer: LoadBalancer,
     task_tx: mpsc::Sender<Task>,
+    mode: TrainingMode,
+    epochs: u32,
 }
 
 impl Scheduler {
-    pub fn new(load_balancer: LoadBalancer, task_tx: mpsc::Sender<Task>) -> Self {
+    pub fn new(load_balancer: LoadBalancer, task_tx: mpsc::Sender<Task>, mode: TrainingMode, epochs: u32) -> Self {
         Scheduler {
             load_balancer,
             task_tx,
+            mode,
+            epochs,
         }
     }
 
@@ -39,20 +52,43 @@ impl Scheduler {
         }
     }
 
+    /// Runs the scheduler for a fixed number of epochs. In `ParameterServer` mode
+    /// a `ParameterPull` task is broadcast to all Ki nodes so they can fetch the
+    /// latest model from the An node. In `AllReduce` mode a `GradientUpdate` task is
+    /// broadcast which instructs nodes to compute gradients on their shard.
     pub async fn run_scheduler(&self, interval: Duration) {
         let mut ticker = time::interval(interval);
-        loop {
+        for _ in 0..self.epochs {
             ticker.tick().await;
-            // Placeholder for actual task generation or retrieval logic
+            let task_type = match self.mode {
+                TrainingMode::ParameterServer => TaskType::ParameterPull,
+                TrainingMode::AllReduce => TaskType::GradientUpdate,
+            };
             let task = Task {
                 task_id: Uuid::new_v4(),
-                data: "Sample task data".to_string(),
+                task_type,
+                data: String::new(),
             };
-
-            if let Err(e) = self.schedule_task(task).await {
-                error!("Failed to schedule task: {:?}", e);
+            if let Err(e) = self.broadcast_task(task).await {
+                error!("Failed to dispatch task: {:?}", e);
             }
         }
+    }
+
+    /// Sends a task to every node managed by the scheduler.
+    async fn broadcast_task(&self, task: Task) -> Result<(), Box<dyn Error>> {
+        let nodes = self.load_balancer.nodes.read().await;
+        for node_id in nodes.keys() {
+            info!("Broadcasting task {} to node {}", task.task_id, node_id);
+            self.task_tx
+                .send(task.clone())
+                .await
+                .map_err(|e| {
+                    error!("Failed to send task: {:?}", e);
+                    e
+                })?;
+        }
+        Ok(())
     }
 }
 
@@ -66,11 +102,12 @@ mod tests {
     async fn test_schedule_task() {
         let load_balancer = LoadBalancer::new();
         let (task_tx, mut task_rx) = mpsc::channel(10);
-        let scheduler = Scheduler::new(load_balancer.clone(), task_tx);
+        let scheduler = Scheduler::new(load_balancer.clone(), task_tx, TrainingMode::ParameterServer, 1);
 
         load_balancer.add_node(Uuid::new_v4()).await;
         let task = Task {
             task_id: Uuid::new_v4(),
+            task_type: TaskType::ParameterPull,
             data: "Test data".to_string(),
         };
 

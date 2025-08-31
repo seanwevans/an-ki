@@ -1,28 +1,19 @@
 // ki_node.rs: Manages the Ki node behavior, including fetching inputs, running computations,
 // and sending outputs.
 
+use crate::common::{Task, TaskType};
 use crate::config::load_settings;
 use crate::messaging;
 use crate::signals;
 use futures_util::stream::StreamExt;
 use lapin::{options::BasicAckOptions, Channel, Consumer};
-use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tokio::sync::oneshot;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};
 
-#[derive(Serialize, Deserialize, Debug)]
-struct TaskMessage {
-    task_id: String,
-    data: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-struct ResultMessage {
-    task_id: String,
-    result: String,
-}
+#[cfg(feature = "tch")]
+use tch::Tensor;
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
     #[cfg(unix)]
@@ -92,7 +83,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 delivery = consumer.next() => {
                     match delivery {
                         Some(Ok(delivery)) => {
-                            let task_message: TaskMessage = serde_json::from_slice(&delivery.data).map_err(|e| {
+                            let task_message: Task = serde_json::from_slice(&delivery.data).map_err(|e| {
                                 error!("Failed to deserialize task message: {:?}", e);
                                 e
                             })?;
@@ -144,19 +135,30 @@ async fn setup_consumer(
     Ok((channel, consumer))
 }
 
-async fn perform_computation(task: TaskMessage) -> ResultMessage {
-    // Placeholder for the computation logic
-    info!("Performing computation for task ID: {}", task.task_id);
-    let computed_result = format!("Processed data: {}", task.data);
-
-    ResultMessage {
-        task_id: task.task_id,
-        result: computed_result,
+async fn perform_computation(task: Task) -> Task {
+    #[cfg(feature = "tch")]
+    {
+        info!("Performing computation for task ID: {}", task.task_id);
+        let input: Vec<f32> = serde_json::from_str(&task.data).unwrap_or_default();
+        let tensor = Tensor::of_slice(&input);
+        let grad_tensor = &tensor * 2.0;
+        let grad: Vec<f32> = Vec::<f32>::from(grad_tensor);
+        let data = serde_json::to_string(&grad).unwrap_or_default();
+        Task { task_id: task.task_id, task_type: TaskType::GradientUpdate, data }
+    }
+    #[cfg(not(feature = "tch"))]
+    {
+        info!("Performing computation for task ID: {}", task.task_id);
+        Task {
+            task_id: task.task_id,
+            task_type: TaskType::GradientUpdate,
+            data: format!("Processed data: {}", task.data),
+        }
     }
 }
 
-async fn send_result(result: ResultMessage, channel: &Channel) -> Result<(), Box<dyn Error>> {
-    let result_queue = "an_result_queue";
+async fn send_result(result: Task, channel: &Channel) -> Result<(), Box<dyn Error>> {
+    let result_queue = "an_task_queue";
     let payload = serde_json::to_vec(&result).map_err(|e| {
         error!("Failed to serialize result: {:?}", e);
         e
@@ -170,6 +172,7 @@ async fn send_result(result: ResultMessage, channel: &Channel) -> Result<(), Box
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::{Task, TaskType};
 
     #[tokio::test]
     async fn test_setup_consumer_failure() {
@@ -190,19 +193,20 @@ mod tests {
             Err(_) => return, // RabbitMQ not available
         };
 
-        messaging::declare_queue(&channel, "an_result_queue")
+        messaging::declare_queue(&channel, "an_task_queue")
             .await
             .expect("declare result queue");
 
-        let result = ResultMessage {
-            task_id: "1".into(),
-            result: "ok".into(),
+        let result = Task {
+            task_id: uuid::Uuid::new_v4(),
+            task_type: TaskType::GradientUpdate,
+            data: "ok".into(),
         };
         send_result(result.clone(), &channel)
             .await
             .expect("send result");
 
-        let mut consumer = messaging::consume_messages(&channel, "an_result_queue", "test_cons")
+        let mut consumer = messaging::consume_messages(&channel, "an_task_queue", "test_cons")
             .await
             .expect("consume result queue");
 
@@ -212,8 +216,8 @@ mod tests {
             .expect("consumer closed")
             .expect("delivery");
 
-        let received: ResultMessage = serde_json::from_slice(&delivery.data).unwrap();
-        assert_eq!(received, result);
+        let received: Task = serde_json::from_slice(&delivery.data).unwrap();
+        assert_eq!(received.task_id, result.task_id);
 
         delivery
             .ack(BasicAckOptions::default())

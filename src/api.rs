@@ -1,6 +1,6 @@
 // api.rs: Implements REST API endpoints for interacting with the task recovery system.
 
-use crate::common::Task;
+use crate::common::{Task, TaskType};
 use crate::task_recovery::TaskRecoveryManager;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -92,6 +92,7 @@ mod tests {
 
         let new_task = Task {
             task_id: Uuid::new_v4(),
+            task_type: TaskType::ParameterPull,
             data: "Test task data".to_string(),
         };
 
@@ -112,6 +113,7 @@ mod tests {
 
         let task = Task {
             task_id: Uuid::new_v4(),
+            task_type: TaskType::ParameterPull,
             data: "Test task data".to_string(),
         };
         task_manager.add_task(task.clone()).await;
@@ -132,6 +134,7 @@ mod tests {
 
         let task = Task {
             task_id: Uuid::new_v4(),
+            task_type: TaskType::ParameterPull,
             data: "Test task data".to_string(),
         };
         task_manager.add_task(task.clone()).await;
