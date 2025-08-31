@@ -82,12 +82,13 @@ async fn delete_task_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::get_pool;
     use warp::test::request;
 
     #[tokio::test]
     async fn test_add_task() {
-        let storage_file = "test_tasks_api.json";
-        let task_manager = Arc::new(TaskRecoveryManager::new(storage_file));
+        let pool = get_pool().await.expect("pool");
+        let task_manager = Arc::new(TaskRecoveryManager::new(pool.clone()));
         let api = Api::new(task_manager.clone());
 
         let new_task = Task {
@@ -103,12 +104,13 @@ mod tests {
             .reply(&api.filters())
             .await;
         assert_eq!(res.status(), StatusCode::CREATED);
+        task_manager.remove_task(&new_task.task_id).await;
     }
 
     #[tokio::test]
     async fn test_get_task() {
-        let storage_file = "test_tasks_api.json";
-        let task_manager = Arc::new(TaskRecoveryManager::new(storage_file));
+        let pool = get_pool().await.expect("pool");
+        let task_manager = Arc::new(TaskRecoveryManager::new(pool));
         let api = Api::new(task_manager.clone());
 
         let task = Task {
@@ -124,12 +126,13 @@ mod tests {
             .reply(&api.filters())
             .await;
         assert_eq!(res.status(), StatusCode::OK);
+        task_manager.remove_task(&task.task_id).await;
     }
 
     #[tokio::test]
     async fn test_delete_task() {
-        let storage_file = "test_tasks_api.json";
-        let task_manager = Arc::new(TaskRecoveryManager::new(storage_file));
+        let pool = get_pool().await.expect("pool");
+        let task_manager = Arc::new(TaskRecoveryManager::new(pool));
         let api = Api::new(task_manager.clone());
 
         let task = Task {
