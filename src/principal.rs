@@ -5,7 +5,7 @@ use crate::signals;
 
 use crate::config::load_settings;
 use futures_util::stream::StreamExt;
-use lapin::{options::BasicAckOptions, Connection, ConnectionProperties};
+use lapin::{options::BasicAckOptions, Channel, Connection, ConnectionProperties};
 use std::error::Error;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
