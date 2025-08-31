@@ -30,6 +30,13 @@ A distributed neural network project that supports task scheduling, load balanci
 - **Monitoring and Metrics:** Supports Prometheus metrics and detailed logging for monitoring.
 - **Configurable:** Easily configurable using environment variables and configuration files.
 
+### Task Recovery Consistency
+
+Tasks are first inserted into an in-memory map and then written to the database.
+If the database write fails, the in-memory insert is rolled back and the error is
+surfaced to the caller. Clients should only rely on a task being present after
+handling the `Result` from the add operation.
+
 ## Architecture
 
 The system is composed of three main types of nodes:

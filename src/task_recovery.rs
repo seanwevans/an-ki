@@ -8,6 +8,8 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 use uuid::Uuid;
 
+type Error = Box<dyn std::error::Error + Send + Sync>;
+
 #[derive(Clone)]
 pub struct TaskRecoveryManager {
     pub tasks: Arc<RwLock<HashMap<Uuid, Task>>>,
@@ -24,11 +26,11 @@ impl TaskRecoveryManager {
 
     /// Adds a task to the in-memory map and attempts to persist it to the database.
     ///
-    /// Note: The database operation occurs after the task has been inserted into the
-    /// in-memory map. If the persistence step fails, the task will remain only in
-    /// memory. Consider implementing compensating logic (e.g. retrying or removing
-    /// the task) to maintain consistency between memory and the database.
-    pub async fn add_task(&self, task: Task) {
+    /// The task is inserted into the in-memory map before contacting the database so
+    /// the write lock is not held across an await. If persistence fails at any stage,
+    /// the in-memory insertion is rolled back and an error is returned so callers can
+    /// react accordingly.
+    pub async fn add_task(&self, task: Task) -> Result<(), Error> {
         let mut tasks = self.tasks.write().await;
         tasks.insert(task.task_id, task.clone());
         info!("Added task to recovery manager: {:?}", task);
@@ -37,28 +39,32 @@ impl TaskRecoveryManager {
         // blocking other readers/writers while awaiting a connection.
         drop(tasks);
 
-        match self.pool.get().await {
-            Ok(conn) => {
-                let task_type = format!("{:?}", task.task_type);
-                if let Err(e) = conn
-                    .execute(
-                        "INSERT INTO tasks (task_id, task_type, data) VALUES ($1,$2,$3) \
-ON CONFLICT (task_id) DO UPDATE SET task_type=$2, data=$3",
-                        &[&task.task_id, &task_type, &task.data],
-                    )
-                    .await
-                {
-                    error!("Failed to persist task: {:?}", e);
-                    // At this point the task exists only in memory. A compensation
-                    // strategy may be needed if persistence failures must be handled.
-                }
-            }
+        let conn = match self.pool.get().await {
+            Ok(conn) => conn,
             Err(e) => {
                 error!("Failed to acquire connection: {:?}", e);
-                // The task remains in-memory only if the database connection
-                // cannot be established.
+                let mut tasks = self.tasks.write().await;
+                tasks.remove(&task.task_id);
+                return Err(Box::new(e));
             }
+        };
+
+        let task_type = format!("{:?}", task.task_type);
+        if let Err(e) = conn
+            .execute(
+                "INSERT INTO tasks (task_id, task_type, data) VALUES ($1,$2,$3) \
+ON CONFLICT (task_id) DO UPDATE SET task_type=$2, data=$3",
+                &[&task.task_id, &task_type, &task.data],
+            )
+            .await
+        {
+            error!("Failed to persist task: {:?}", e);
+            let mut tasks = self.tasks.write().await;
+            tasks.remove(&task.task_id);
+            return Err(Box::new(e));
         }
+
+        Ok(())
     }
 
     pub async fn remove_task(&self, task_id: &Uuid) {
@@ -136,11 +142,11 @@ mod tests {
             data: "Test data".to_string(),
         };
 
-        recovery_manager.add_task(task.clone()).await;
+        recovery_manager.add_task(task.clone()).await.unwrap();
         recovery_manager.remove_task(&task.task_id).await;
 
         // Recover tasks from database
-        recovery_manager.add_task(task.clone()).await;
+        recovery_manager.add_task(task.clone()).await.unwrap();
         recovery_manager.recover_tasks().await.unwrap();
         let tasks = recovery_manager.tasks.read().await;
         let recovered = tasks.get(&task.task_id).expect("task missing");
@@ -168,7 +174,7 @@ mod tests {
             data: "one".to_string(),
         };
 
-        recovery_manager.add_task(task.clone()).await;
+        recovery_manager.add_task(task.clone()).await.unwrap();
 
         let updated_task = Task {
             task_id,
@@ -176,7 +182,10 @@ mod tests {
             data: "two".to_string(),
         };
 
-        recovery_manager.add_task(updated_task.clone()).await;
+        recovery_manager
+            .add_task(updated_task.clone())
+            .await
+            .unwrap();
 
         let row = pool
             .get()
@@ -267,7 +276,7 @@ mod tests {
         let manager_clone = recovery_manager.clone();
         let task_clone = task.clone();
         let handle = tokio::spawn(async move {
-            manager_clone.add_task(task_clone).await;
+            manager_clone.add_task(task_clone).await.unwrap();
         });
 
         // Give add_task a moment to insert the task and reach the awaiting connection.
