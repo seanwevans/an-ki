@@ -18,11 +18,13 @@ use std::env;
 use std::error::Error;
 use tracing::info;
 
+use crate::common::NodeRole;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String,  // Subject (usually the node ID)
-    pub role: String, // Role of the node (e.g., principal, teacher, ki)
-    pub exp: usize,   // Expiration time as a UNIX timestamp
+    pub sub: String,    // Subject (usually the node ID)
+    pub role: NodeRole, // Role of the node (e.g., principal, an, ki)
+    pub exp: usize,     // Expiration time as a UNIX timestamp
 }
 
 fn get_secret_key() -> Result<String, env::VarError> {
@@ -31,13 +33,13 @@ fn get_secret_key() -> Result<String, env::VarError> {
 
 pub fn generate_token(
     node_id: &str,
-    role: &str,
+    role: NodeRole,
     expiration_minutes: i64,
 ) -> Result<String, Box<dyn Error>> {
     let expiration = Utc::now() + Duration::minutes(expiration_minutes);
     let claims = Claims {
         sub: node_id.to_owned(),
-        role: role.to_owned(),
+        role,
         exp: expiration.timestamp() as usize,
     };
 
@@ -48,8 +50,8 @@ pub fn generate_token(
         &EncodingKey::from_secret(secret_key.as_ref()),
     )?;
     info!(
-        "Generated token for node_id: {} with role: {}",
-        node_id, role
+        "Generated token for node_id: {} with role: {:?}",
+        node_id, claims.role
     );
     Ok(token)
 }
@@ -62,7 +64,7 @@ pub fn verify_token(token: &str) -> Result<TokenData<Claims>, Box<dyn Error>> {
         &Validation::default(),
     )?;
     info!(
-        "Verified token for node_id: {} with role: {}",
+        "Verified token for node_id: {} with role: {:?}",
         token_data.claims.sub, token_data.claims.role
     );
     Ok(token_data)
@@ -71,7 +73,7 @@ pub fn verify_token(token: &str) -> Result<TokenData<Claims>, Box<dyn Error>> {
 pub fn renew_token(token: &str, expiration_minutes: i64) -> Result<String, Box<dyn Error>> {
     let token_data = verify_token(token)?;
     let Claims { sub, role, .. } = &token_data.claims;
-    generate_token(sub, role, expiration_minutes)
+    generate_token(sub, role.clone(), expiration_minutes)
 }
 
 const SALT_LEN: usize = 16;
@@ -196,6 +198,7 @@ mod tests {
         decrypt_message, encrypt_message, generate_challenge, generate_token, renew_token,
         sign_challenge, validate_certificate, verify_challenge, verify_token, Claims,
     };
+    use crate::common::NodeRole;
     use rcgen::{
         BasicConstraints, Certificate as RcCertificate, CertificateParams, ExtendedKeyUsagePurpose,
         IsCa,
@@ -205,8 +208,8 @@ mod tests {
     fn test_generate_and_verify_token() {
         std::env::set_var("JWT_SECRET_KEY", "test_secret_key");
         let node_id = "test_node";
-        let role = "teacher";
-        let token = generate_token(node_id, role, 60).unwrap();
+        let role = NodeRole::An;
+        let token = generate_token(node_id, role.clone(), 60).unwrap();
         let token_data = verify_token(&token).unwrap();
         let Claims {
             sub,
@@ -241,7 +244,7 @@ mod tests {
     #[test]
     fn test_renew_token() {
         std::env::set_var("JWT_SECRET_KEY", "test_secret_key");
-        let token = generate_token("node", "role", 1).unwrap();
+        let token = generate_token("node", NodeRole::Ki, 1).unwrap();
         let renewed = renew_token(&token, 60).unwrap();
         let data = verify_token(&renewed).unwrap();
         assert_eq!(data.claims.sub, "node");

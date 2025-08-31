@@ -51,21 +51,22 @@ impl Dht {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::NodeRole;
     use chrono::Utc;
 
-    fn sample_node(role: &str) -> NodeInfo {
+    fn sample_node(role: NodeRole) -> NodeInfo {
         NodeInfo {
             id: Uuid::new_v4(),
             address: None,
             last_seen: Some(Utc::now()),
-            role: role.to_string(),
+            role,
         }
     }
 
     #[tokio::test]
     async fn test_add_and_get_node() {
         let dht = Dht::new();
-        let node = sample_node("test");
+        let node = sample_node(NodeRole::An);
         let id = node.id;
         dht.add_node(node).await;
         let retrieved = dht.get_node(&id).await;
@@ -76,7 +77,7 @@ mod tests {
     #[tokio::test]
     async fn test_remove_node() {
         let dht = Dht::new();
-        let node = sample_node("test");
+        let node = sample_node(NodeRole::An);
         let id = node.id;
         dht.add_node(node).await;
         dht.remove_node(&id).await;
@@ -86,8 +87,8 @@ mod tests {
     #[tokio::test]
     async fn test_list_nodes() {
         let dht = Dht::new();
-        dht.add_node(sample_node("a")).await;
-        dht.add_node(sample_node("b")).await;
+        dht.add_node(sample_node(NodeRole::An)).await;
+        dht.add_node(sample_node(NodeRole::Ki)).await;
         let nodes = dht.list_nodes().await;
         assert_eq!(nodes.len(), 2);
     }

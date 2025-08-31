@@ -1,6 +1,6 @@
-use uuid::Uuid;
-use serde::{Serialize, Deserialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Represents the kind of task being dispatched between nodes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -22,10 +22,17 @@ pub struct Task {
     pub data: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum NodeRole {
+    Principal,
+    An,
+    Ki,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeInfo {
     pub id: Uuid,
     pub address: Option<String>,
     pub last_seen: Option<DateTime<Utc>>,
-    pub role: String,
+    pub role: NodeRole,
 }

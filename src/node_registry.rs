@@ -8,8 +8,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::common::NodeInfo;
-
+use crate::common::{NodeInfo, NodeRole};
 
 #[derive(Clone)]
 pub struct NodeRegistry {
@@ -23,7 +22,7 @@ impl NodeRegistry {
         }
     }
 
-    pub async fn register_node(&self, node_id: Uuid, role: String) {
+    pub async fn register_node(&self, node_id: Uuid, role: NodeRole) {
         let node_info = NodeInfo {
             id: node_id,
             address: None,
@@ -67,12 +66,13 @@ impl NodeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::NodeRole;
 
     #[tokio::test]
     async fn test_register_and_update_node() {
         let registry = NodeRegistry::new();
         let node_id = Uuid::new_v4();
-        let role = "teacher".to_string();
+        let role = NodeRole::An;
 
         registry.register_node(node_id, role.clone()).await;
         assert!(registry.get_node_info(&node_id).await.is_some());
@@ -86,7 +86,7 @@ mod tests {
     async fn test_remove_node() {
         let registry = NodeRegistry::new();
         let node_id = Uuid::new_v4();
-        let role = "ki".to_string();
+        let role = NodeRole::Ki;
 
         registry.register_node(node_id, role).await;
         assert!(registry.get_node_info(&node_id).await.is_some());
@@ -101,12 +101,8 @@ mod tests {
         let node_id_1 = Uuid::new_v4();
         let node_id_2 = Uuid::new_v4();
 
-        registry
-            .register_node(node_id_1, "teacher".to_string())
-            .await;
-        registry
-            .register_node(node_id_2, "ki".to_string())
-            .await;
+        registry.register_node(node_id_1, NodeRole::An).await;
+        registry.register_node(node_id_2, NodeRole::Ki).await;
 
         let active_nodes = registry.list_active_nodes().await;
         assert_eq!(active_nodes.len(), 2);
