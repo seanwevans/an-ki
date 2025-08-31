@@ -7,20 +7,16 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
+use tokio_rustls::{
+    rustls::{ClientConfig, ServerName},
+    TlsConnector,
+};
 use tracing::{error, info};
-use std::collections::HashSet;
-use tokio_rustls::{TlsConnector, rustls::{ClientConfig, ServerName}};
 
 #[derive(Clone, Debug)]
 pub struct NetworkManager {
     pub connected_nodes: Arc<RwLock<HashSet<SocketAddr>>>,
     tls_config: Arc<ClientConfig>,
-}
-
-impl Default for NetworkManager {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl NetworkManager {
@@ -34,6 +30,7 @@ impl NetworkManager {
     pub async fn connect_to_node(
         &self,
         address: SocketAddr,
+        domain: &str,
         retry_count: u32,
         timeout_duration: Duration,
     ) -> Result<(), Box<dyn Error>> {
@@ -89,21 +86,22 @@ impl NetworkManager {
     }
 }
 
-impl Default for NetworkManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{
+        BasicConstraints, Certificate as RcCert, CertificateParams, ExtendedKeyUsagePurpose, IsCa,
+    };
+    use rustls::server::AllowAnyAuthenticatedClient;
+    use std::sync::Arc;
     use tokio::net::TcpListener;
     use tokio::time::Duration;
-    use tokio_rustls::{TlsAcceptor, rustls::{ClientConfig, ServerConfig, Certificate as RustlsCert, PrivateKey, RootCertStore}};
-    use rustls::server::AllowAnyAuthenticatedClient;
-    use rcgen::{Certificate as RcCert, CertificateParams, IsCa, BasicConstraints, ExtendedKeyUsagePurpose};
-    use std::sync::Arc;
+    use tokio_rustls::{
+        rustls::{
+            Certificate as RustlsCert, ClientConfig, PrivateKey, RootCertStore, ServerConfig,
+        },
+        TlsAcceptor,
+    };
 
     fn build_configs() -> (ClientConfig, ServerConfig) {
         // CA
