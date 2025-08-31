@@ -78,8 +78,8 @@ impl Scheduler {
     /// Sends a task to every node managed by the scheduler.
     async fn broadcast_task(&self, task: Task) -> Result<(), Box<dyn Error>> {
         let nodes = self.load_balancer.nodes.read().await;
-        for node_id in nodes.keys() {
-            info!("Broadcasting task {} to node {}", task.task_id, node_id);
+        for node in nodes.iter() {
+            info!("Broadcasting task {} to node {}", task.task_id, node.node_id);
             self.task_tx
                 .send(task.clone())
                 .await
