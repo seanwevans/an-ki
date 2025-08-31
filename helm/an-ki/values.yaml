@@ -1,0 +1,15 @@
+global:
+  imageRepository: an-ki
+  imageTag: latest
+  amqpAddr: amqp://rabbitmq:5672/%2f
+  jwtSecretKey: change-me
+  databaseUrl: postgresql://user:pass@db:5432/app
+
+principal:
+  replicas: 1
+
+an:
+  replicas: 1
+
+ki:
+  replicas: 1

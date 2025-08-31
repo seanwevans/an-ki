@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: an
+spec:
+  replicas: {{ .Values.an.replicas }}
+  selector:
+    matchLabels:
+      app: an
+  template:
+    metadata:
+      labels:
+        app: an
+    spec:
+      containers:
+        - name: an
+          image: {{ .Values.global.imageRepository }}:{{ .Values.global.imageTag }}
+          command: ["an-ki", "an"]
+          env:
+            - name: AMQP_ADDR
+              value: {{ .Values.global.amqpAddr | quote }}
+            - name: JWT_SECRET_KEY
+              value: {{ .Values.global.jwtSecretKey | quote }}
+            - name: DATABASE_URL
+              value: {{ .Values.global.databaseUrl | quote }}
+          ports:
+            - containerPort: 3030

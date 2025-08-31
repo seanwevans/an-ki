@@ -1,13 +1,13 @@
 // network.rs: Abstracts network operations such as connecting nodes and handling retries.
 
-use tokio::net::TcpStream;
-use tokio::time::{timeout, Duration};
-use tracing::{info, error};
+use std::collections::HashSet;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::net::TcpStream;
 use tokio::sync::RwLock;
-use std::collections::HashSet;
+use tokio::time::{timeout, Duration};
+use tracing::{error, info};
 
 #[derive(Clone, Debug)]
 pub struct NetworkManager {
@@ -21,7 +21,12 @@ impl NetworkManager {
         }
     }
 
-    pub async fn connect_to_node(&self, address: SocketAddr, retry_count: u32, timeout_duration: Duration) -> Result<(), Box<dyn Error>> {
+    pub async fn connect_to_node(
+        &self,
+        address: SocketAddr,
+        retry_count: u32,
+        timeout_duration: Duration,
+    ) -> Result<(), Box<dyn Error>> {
         for attempt in 0..retry_count {
             match timeout(timeout_duration, TcpStream::connect(address)).await {
                 Ok(Ok(_stream)) => {
@@ -30,10 +35,21 @@ impl NetworkManager {
                     return Ok(());
                 }
                 Ok(Err(e)) => {
-                    error!("Failed to connect to node at {}: {}. Attempt {}/{}", address, e, attempt + 1, retry_count);
+                    error!(
+                        "Failed to connect to node at {}: {}. Attempt {}/{}",
+                        address,
+                        e,
+                        attempt + 1,
+                        retry_count
+                    );
                 }
                 Err(_) => {
-                    error!("Connection to node at {} timed out. Attempt {}/{}", address, attempt + 1, retry_count);
+                    error!(
+                        "Connection to node at {} timed out. Attempt {}/{}",
+                        address,
+                        attempt + 1,
+                        retry_count
+                    );
                 }
             }
         }
@@ -52,6 +68,12 @@ impl NetworkManager {
     pub async fn list_connected_nodes(&self) -> Vec<SocketAddr> {
         let nodes = self.connected_nodes.read().await;
         nodes.iter().cloned().collect()
+    }
+}
+
+impl Default for NetworkManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -94,13 +116,11 @@ mod tests {
             .insert(test_address);
 
         network_manager.disconnect_node(&test_address).await;
-        assert!(
-            !network_manager
-                .connected_nodes
-                .read()
-                .await
-                .contains(&test_address)
-        );
+        assert!(!network_manager
+            .connected_nodes
+            .read()
+            .await
+            .contains(&test_address));
     }
 
     #[tokio::test]

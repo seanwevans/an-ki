@@ -1,15 +1,16 @@
 // principal.rs: Implements the specific responsibilities of the Principal, including role management and global coordination.
 
+use crate::messaging::{consume_messages, declare_queue, publish_message};
 use crate::signals;
-use crate::messaging::{consume_messages, declare_queue, establish_connection, publish_message};
+use lapin::{Connection, ConnectionProperties};
 
+use crate::config::load_settings;
 use futures_util::stream::StreamExt;
 use lapin::options::BasicAckOptions;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tokio::sync::oneshot;
 use tracing::{error, info};
-use crate::config::load_settings;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct RoleAssignment {
@@ -37,14 +38,9 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         let _ = shutdown_tx.send(());
     });
 
-    // Establish connection to RabbitMQ
-    let amqp_addr = std::env::var("AMQP_ADDR").map_err(|e| {
-        error!("Failed to read AMQP_ADDR environment variable: {:?}", e);
-
     // Establish connection to RabbitMQ using configuration settings
     let settings = load_settings().map_err(|e| {
         error!("Failed to load settings: {:?}", e);
-
         e
     })?;
 

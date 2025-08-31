@@ -1,6 +1,8 @@
-# Example configuration for the distributed neural network system
-# Copy this file to `config/default.toml` and adjust values as needed
+# Default configuration for the distributed neural network system
+# Values can be overridden with environment variables or `*_FILE` entries provided
+# by ConfigMaps. For example, set `AMQP_ADDR` or `AMQP_ADDR_FILE` to override
+# `amqp_addr`.
 
 amqp_addr = "amqp://127.0.0.1:5672/%2f"
-jwt_secret_key = "<JWT_SECRET_KEY>"
+jwt_secret_key = "change-me"
 database_url = "postgresql://root@localhost:26257/defaultdb?sslmode=disable"

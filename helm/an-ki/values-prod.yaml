@@ -1,0 +1,6 @@
+principal:
+  replicas: 2
+an:
+  replicas: 3
+ki:
+  replicas: 5

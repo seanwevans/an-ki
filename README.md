@@ -12,6 +12,7 @@ A distributed neural network project that supports task scheduling, load balanci
 - [Usage](#usage)
   - [Running the Nodes](#running-the-nodes)
   - [API Endpoints](#api-endpoints)
+- [Deployment](#deployment)
 - [Modules Overview](#modules-overview)
 - [Development](#development)
   - [Testing](#testing)
@@ -170,6 +171,42 @@ DELETE /tasks/{task_id}: Delete a specific task by providing the task ID.
 curl -X DELETE http://localhost:3030/tasks/{task_id}
 
 These endpoints allow external interaction with the distributed network, such as adding new tasks or querying the current tasks.
+
+## Deployment
+
+### Docker Images
+
+Separate Dockerfiles are provided for each node type. Build the images using:
+
+```bash
+docker build -f Dockerfile.principal -t an-ki:principal .
+docker build -f Dockerfile.an -t an-ki:an .
+docker build -f Dockerfile.ki -t an-ki:ki .
+```
+
+Each image runs the appropriate node (`principal`, `an`, or `ki`) when started.
+
+### Helm Chart
+
+A Helm chart in `helm/an-ki` simplifies Kubernetes deployment. Replica counts and core
+settings are configurable through `values.yaml`, with environment-specific overrides
+available in files like `values-dev.yaml` and `values-prod.yaml`.
+
+Deploy to a cluster with:
+
+```bash
+helm install an-ki ./helm/an-ki -f helm/an-ki/values.yaml -f helm/an-ki/values-dev.yaml
+```
+
+Override the `values-dev.yaml` file with `values-prod.yaml` or your own file for
+production environments.
+
+### Service Discovery
+
+Within Kubernetes, each node is exposed via a `Service`, enabling discovery through
+Kubernetes DNS (e.g., `principal.default.svc.cluster.local`). Outside Kubernetes,
+nodes rely on the built-in DHT for dynamic discovery or can be configured with
+explicit addresses using the configuration system.
 
 ## Development
 
