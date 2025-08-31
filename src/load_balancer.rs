@@ -37,6 +37,12 @@ pub struct LoadBalancer {
     pub heap: Arc<RwLock<BinaryHeap<NodeLoadInfo>>>,
 }
 
+impl Default for LoadBalancer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LoadBalancer {
     pub fn new() -> Self {
         LoadBalancer {
