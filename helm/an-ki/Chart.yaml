@@ -1,0 +1,4 @@
+apiVersion: v2
+name: an-ki
+version: 0.1.0
+description: Helm chart for deploying principal, An, and Ki nodes
