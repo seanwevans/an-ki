@@ -76,8 +76,16 @@ async fn add_task_handler(
     task_manager: Arc<TaskRecoveryManager>,
     new_task: Task,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    task_manager.add_task(new_task).await;
-    Ok(warp::reply::with_status("Task added", StatusCode::CREATED))
+    match task_manager.add_task(new_task).await {
+        Ok(_) => Ok(warp::reply::with_status("Task added", StatusCode::CREATED)),
+        Err(e) => {
+            error!("Failed to add task: {:?}", e);
+            Ok(warp::reply::with_status(
+                "Internal server error",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ))
+        }
+    }
 }
 
 async fn delete_task_handler(
@@ -127,7 +135,7 @@ mod tests {
             task_type: TaskType::ParameterPull,
             data: "Test task data".to_string(),
         };
-        task_manager.add_task(task.clone()).await;
+        task_manager.add_task(task.clone()).await.unwrap();
 
         let res = request()
             .method("GET")
@@ -149,7 +157,7 @@ mod tests {
             task_type: TaskType::ParameterPull,
             data: "Test task data".to_string(),
         };
-        task_manager.add_task(task.clone()).await;
+        task_manager.add_task(task.clone()).await.unwrap();
 
         let res = request()
             .method("DELETE")
