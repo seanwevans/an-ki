@@ -1,6 +1,7 @@
 // load_balancer.rs: Implements load balancing for An nodes to effectively distribute tasks.
 
-use std::collections::HashMap;
+use std::collections::BinaryHeap;
+use std::cmp::Ordering;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -8,94 +9,122 @@ use tokio::sync::broadcast;
 use tracing::{info, error};
 use rand::seq::IteratorRandom;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NodeLoadInfo {
     pub node_id: Uuid,
     pub task_count: usize,
 }
 
+impl Ord for NodeLoadInfo {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Reverse the comparison for a min-heap based on task_count
+        other.task_count.cmp(&self.task_count)
+            .then_with(|| self.node_id.cmp(&other.node_id))
+    }
+}
+
+impl PartialOrd for NodeLoadInfo {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[derive(Clone)]
 pub struct LoadBalancer {
-    pub nodes: Arc<RwLock<HashMap<Uuid, NodeLoadInfo>>>,
+    pub nodes: Arc<RwLock<BinaryHeap<NodeLoadInfo>>>,
 }
 
 impl LoadBalancer {
     pub fn new() -> Self {
         LoadBalancer {
-            nodes: Arc::new(RwLock::new(HashMap::new())),
+            nodes: Arc::new(RwLock::new(BinaryHeap::new())),
         }
     }
 
     pub async fn add_node(&self, node_id: Uuid) {
         let mut nodes = self.nodes.write().await;
-        nodes.insert(node_id, NodeLoadInfo { node_id, task_count: 0 });
+        nodes.push(NodeLoadInfo { node_id, task_count: 0 });
         info!("Added node to load balancer: {}", node_id);
     }
 
     pub async fn remove_node(&self, node_id: &Uuid) {
         let mut nodes = self.nodes.write().await;
-        if nodes.remove(node_id).is_some() {
+        let mut vec: Vec<_> = nodes.drain().collect();
+        let len_before = vec.len();
+        vec.retain(|n| &n.node_id != node_id);
+        if vec.len() < len_before {
             info!("Removed node from load balancer: {}", node_id);
         } else {
             error!("Failed to remove node from load balancer: Node not found: {}", node_id);
         }
+        *nodes = BinaryHeap::from(vec);
     }
 
     pub async fn assign_task(&self) -> Option<Uuid> {
         let mut nodes = self.nodes.write().await;
-        if nodes.is_empty() {
-            error!("No nodes available to assign task.");
-            return None;
-        }
-
-        // Find the node with the least tasks
-        if let Some((node_id, node_info)) = nodes.iter_mut().min_by_key(|(_, n)| n.task_count) {
-            node_info.task_count += 1;
-            info!(
-                "Assigned task to node: {}. Task count: {}",
-                node_id,
-                node_info.task_count
-            );
-            Some(*node_id)
+        if let Some(mut node) = nodes.pop() {
+            node.task_count += 1;
+            let node_id = node.node_id;
+            info!("Assigned task to node: {}. Task count: {}", node_id, node.task_count);
+            nodes.push(node);
+            Some(node_id)
         } else {
+            error!("No nodes available to assign task.");
             None
         }
     }
 
     pub async fn complete_task(&self, node_id: &Uuid) {
         let mut nodes = self.nodes.write().await;
-        if let Some(node_info) = nodes.get_mut(node_id) {
-            if node_info.task_count > 0 {
-                node_info.task_count -= 1;
-                info!("Completed task on node: {}. Remaining task count: {}", node_id, node_info.task_count);
+        let mut vec: Vec<_> = nodes.drain().collect();
+        let mut found = false;
+        for node in vec.iter_mut() {
+            if &node.node_id == node_id {
+                if node.task_count > 0 {
+                    node.task_count -= 1;
+                    info!("Completed task on node: {}. Remaining task count: {}", node_id, node.task_count);
+                }
+                found = true;
+                break;
             }
-        } else {
+        }
+        if !found {
             error!("Failed to complete task: Node not found: {}", node_id);
         }
+        *nodes = BinaryHeap::from(vec);
     }
 
     pub async fn random_node(&self) -> Option<Uuid> {
         let nodes = self.nodes.read().await;
-        nodes.keys().cloned().choose(&mut rand::thread_rng())
+        let vec: Vec<_> = nodes.clone().into_vec();
+        vec.iter().map(|n| n.node_id).choose(&mut rand::thread_rng())
     }
 }
 
 pub async fn monitor_node_load(mut rx: broadcast::Receiver<NodeLoadInfo>, load_balancer: LoadBalancer) {
     while let Ok(node_load) = rx.recv().await {
         let mut nodes = load_balancer.nodes.write().await;
-        if let Some(node_info) = nodes.get_mut(&node_load.node_id) {
-            node_info.task_count = node_load.task_count;
-            info!("Updated load info for node: {}. Task count: {}", node_load.node_id, node_load.task_count);
-        } else {
+        let mut vec: Vec<_> = nodes.drain().collect();
+        let mut found = false;
+        for node in vec.iter_mut() {
+            if node.node_id == node_load.node_id {
+                node.task_count = node_load.task_count;
+                info!("Updated load info for node: {}. Task count: {}", node_load.node_id, node_load.task_count);
+                found = true;
+                break;
+            }
+        }
+        if !found {
             error!("Node not found in load balancer for update: {}", node_load.node_id);
         }
+        *nodes = BinaryHeap::from(vec);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::{HashSet, BinaryHeap};
     use tokio::time::{sleep, Duration};
 
     #[tokio::test]
@@ -110,10 +139,18 @@ mod tests {
         load_balancer.add_node(node3).await;
 
         {
-            let mut nodes = load_balancer.nodes.write().await;
-            nodes.get_mut(&node1).unwrap().task_count = 5;
-            nodes.get_mut(&node2).unwrap().task_count = 3;
-            nodes.get_mut(&node3).unwrap().task_count = 1;
+            let mut heap = load_balancer.nodes.write().await;
+            let mut vec: Vec<_> = heap.drain().collect();
+            for node in vec.iter_mut() {
+                if node.node_id == node1 {
+                    node.task_count = 5;
+                } else if node.node_id == node2 {
+                    node.task_count = 3;
+                } else if node.node_id == node3 {
+                    node.task_count = 1;
+                }
+            }
+            *heap = BinaryHeap::from(vec);
         }
 
         let assigned = load_balancer.assign_task().await.unwrap();
@@ -128,20 +165,30 @@ mod tests {
         load_balancer.add_node(node).await;
 
         {
-            let mut nodes = load_balancer.nodes.write().await;
-            nodes.get_mut(&node).unwrap().task_count = 2;
+            let mut heap = load_balancer.nodes.write().await;
+            let mut vec: Vec<_> = heap.drain().collect();
+            for node_info in vec.iter_mut() {
+                if node_info.node_id == node {
+                    node_info.task_count = 2;
+                }
+            }
+            *heap = BinaryHeap::from(vec);
         }
 
         load_balancer.complete_task(&node).await;
         {
-            let nodes = load_balancer.nodes.read().await;
-            assert_eq!(nodes.get(&node).unwrap().task_count, 1);
+            let heap = load_balancer.nodes.read().await;
+            let vec: Vec<_> = heap.clone().into_vec();
+            let count = vec.iter().find(|n| n.node_id == node).unwrap().task_count;
+            assert_eq!(count, 1);
         }
 
         load_balancer.complete_task(&node).await;
         {
-            let nodes = load_balancer.nodes.read().await;
-            assert_eq!(nodes.get(&node).unwrap().task_count, 0);
+            let heap = load_balancer.nodes.read().await;
+            let vec: Vec<_> = heap.clone().into_vec();
+            let count = vec.iter().find(|n| n.node_id == node).unwrap().task_count;
+            assert_eq!(count, 0);
         }
     }
 
@@ -163,10 +210,14 @@ mod tests {
 
         assert_eq!(assigned.len(), 3);
 
-        let nodes = load_balancer.nodes.read().await;
-        assert_eq!(nodes.get(&node1).unwrap().task_count, 1);
-        assert_eq!(nodes.get(&node2).unwrap().task_count, 1);
-        assert_eq!(nodes.get(&node3).unwrap().task_count, 1);
+        let heap = load_balancer.nodes.read().await;
+        let vec: Vec<_> = heap.clone().into_vec();
+        let c1 = vec.iter().find(|n| n.node_id == node1).unwrap().task_count;
+        let c2 = vec.iter().find(|n| n.node_id == node2).unwrap().task_count;
+        let c3 = vec.iter().find(|n| n.node_id == node3).unwrap().task_count;
+        assert_eq!(c1, 1);
+        assert_eq!(c2, 1);
+        assert_eq!(c3, 1);
     }
 
     #[tokio::test]
@@ -189,7 +240,9 @@ mod tests {
         tokio::spawn(async move { monitor_node_load(rx, lb_clone).await; });
         tx.send(NodeLoadInfo { node_id: node, task_count: 4 }).unwrap();
         sleep(Duration::from_millis(50)).await;
-        let nodes = lb.nodes.read().await;
-        assert_eq!(nodes.get(&node).unwrap().task_count, 4);
+        let heap = lb.nodes.read().await;
+        let vec: Vec<_> = heap.clone().into_vec();
+        let count = vec.iter().find(|n| n.node_id == node).unwrap().task_count;
+        assert_eq!(count, 4);
     }
 }

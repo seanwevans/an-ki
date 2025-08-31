@@ -73,7 +73,7 @@ clap = { version = "4.4", features = ["derive"] }
 # Testing framework for lazy static initialization
 lazy_static = "1.4"
 tch = { version = "0.14", optional = true }
-openraft = { version = "0.9", features = ["serde", "type-alias"] }
+openraft = { version = "0.9", features = ["serde"] }
 openraft-memstore = "0.9"
 sled = "0.34"
 
@@ -81,4 +81,5 @@ sled = "0.34"
 # Testing utilities
 tokio = { version = "1", features = ["full"] }
 nix = { version = "0.27", features = ["signal"] }
+criterion = "0.5"
 
