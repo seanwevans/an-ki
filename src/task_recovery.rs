@@ -32,7 +32,8 @@ impl TaskRecoveryManager {
                 let task_type = format!("{:?}", task.task_type);
                 if let Err(e) = conn
                     .execute(
-                        "UPSERT INTO tasks (task_id, task_type, data) VALUES ($1, $2, $3)",
+                        "INSERT INTO tasks (task_id, task_type, data) VALUES ($1,$2,$3) \
+ON CONFLICT (task_id) DO UPDATE SET task_type=$2, data=$3",
                         &[&task.task_id, &task_type, &task.data],
                     )
                     .await
@@ -129,6 +130,51 @@ mod tests {
             .await
             .unwrap()
             .execute("DELETE FROM tasks WHERE task_id = $1", &[&task.task_id])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_add_and_update_task() {
+        let pool = get_pool().await.expect("pool");
+        let recovery_manager = TaskRecoveryManager::new(pool.clone());
+
+        let task_id = Uuid::new_v4();
+        let task = Task {
+            task_id,
+            task_type: TaskType::ParameterPull,
+            data: "one".to_string(),
+        };
+
+        recovery_manager.add_task(task.clone()).await;
+
+        let updated_task = Task {
+            task_id,
+            task_type: TaskType::GradientUpdate,
+            data: "two".to_string(),
+        };
+
+        recovery_manager.add_task(updated_task.clone()).await;
+
+        let row = pool
+            .get()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT task_type, data FROM tasks WHERE task_id = $1",
+                &[&task_id],
+            )
+            .await
+            .unwrap();
+        let task_type: String = row.get(0);
+        let data: String = row.get(1);
+        assert_eq!(task_type, format!("{:?}", updated_task.task_type));
+        assert_eq!(data, updated_task.data);
+
+        pool.get()
+            .await
+            .unwrap()
+            .execute("DELETE FROM tasks WHERE task_id = $1", &[&task_id])
             .await
             .unwrap();
     }
