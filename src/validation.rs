@@ -1,9 +1,19 @@
 // validation.rs: Implements data validation logic for messages exchanged between nodes.
 
 use regex::Regex;
+use lazy_static::lazy_static;
 use tracing::{error, info};
 use uuid::Uuid;
 use std::error::Error;
+
+lazy_static! {
+    static ref IP_REGEX: Regex = Regex::new(
+        r"^((25[0-5]|2[0-4][0-9]|[0-1]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[0-1]?[0-9][0-9]?)$",
+    )
+    .expect("Failed to compile IP regex");
+    static ref MESSAGE_REGEX: Regex =
+        Regex::new(r"^[a-zA-Z0-9]+$").expect("Failed to compile message format regex");
+}
 
 #[derive(Debug)]
 pub struct Validator;
@@ -23,10 +33,7 @@ impl Validator {
     }
 
     pub fn validate_ip_address(ip_address: &str) -> Result<(), Box<dyn Error>> {
-        let ip_regex = Regex::new(
-            r"^((25[0-5]|2[0-4][0-9]|[0-1]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[0-1]?[0-9][0-9]?)$",
-        )?;
-        if ip_regex.is_match(ip_address) {
+        if IP_REGEX.is_match(ip_address) {
             info!("Valid IP address: {}", ip_address);
             Ok(())
         } else {
@@ -35,9 +42,8 @@ impl Validator {
         }
     }
 
-    pub fn validate_message_format(message: &str, pattern: &str) -> Result<(), Box<dyn Error>> {
-        let regex = Regex::new(pattern)?;
-        if regex.is_match(message) {
+    pub fn validate_message_format(message: &str) -> Result<(), Box<dyn Error>> {
+        if MESSAGE_REGEX.is_match(message) {
             info!("Message format is valid: {}", message);
             Ok(())
         } else {
@@ -69,10 +75,9 @@ mod tests {
 
     #[test]
     fn test_validate_message_format() {
-        let message = "Hello123";
-        let valid_pattern = r"^[a-zA-Z0-9]+$";
-        let invalid_pattern = r"^[a-z]+$";
-        assert!(Validator::validate_message_format(message, valid_pattern).is_ok());
-        assert!(Validator::validate_message_format(message, invalid_pattern).is_err());
+        let valid_message = "Hello123"; // contains only alphanumeric characters
+        let invalid_message = "Hello_123"; // contains an underscore, which is invalid
+        assert!(Validator::validate_message_format(valid_message).is_ok());
+        assert!(Validator::validate_message_format(invalid_message).is_err());
     }
 }
