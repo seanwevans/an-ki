@@ -1,13 +1,13 @@
 // load_balancer.rs: Implements load balancing for An nodes to effectively distribute tasks.
 
-use std::collections::{BinaryHeap, HashMap};
-use std::cmp::Ordering;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use uuid::Uuid;
-use tokio::sync::broadcast;
-use tracing::{info, error};
 use rand::seq::IteratorRandom;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap};
+use std::sync::Arc;
+use tokio::sync::broadcast;
+use tokio::sync::RwLock;
+use tracing::{error, info};
+use uuid::Uuid;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NodeLoadInfo {
@@ -18,7 +18,9 @@ pub struct NodeLoadInfo {
 impl Ord for NodeLoadInfo {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse the comparison for a min-heap based on task_count
-        other.task_count.cmp(&self.task_count)
+        other
+            .task_count
+            .cmp(&self.task_count)
             .then_with(|| self.node_id.cmp(&other.node_id))
     }
 }
@@ -45,7 +47,10 @@ impl LoadBalancer {
 
     pub async fn add_node(&self, node_id: Uuid) {
         let mut nodes = self.nodes.write().await;
-        let info = NodeLoadInfo { node_id, task_count: 0 };
+        let info = NodeLoadInfo {
+            node_id,
+            task_count: 0,
+        };
         nodes.insert(node_id, info.clone());
         drop(nodes);
         let mut heap = self.heap.write().await;
@@ -57,8 +62,15 @@ impl LoadBalancer {
         let mut nodes = self.nodes.write().await;
         if nodes.remove(node_id).is_some() {
             info!("Removed node from load balancer: {}", node_id);
+            drop(nodes);
+            let mut heap = self.heap.write().await;
+            let rebuilt: BinaryHeap<_> = heap.drain().filter(|n| &n.node_id != node_id).collect();
+            *heap = rebuilt;
         } else {
-            error!("Failed to remove node from load balancer: Node not found: {}", node_id);
+            error!(
+                "Failed to remove node from load balancer: Node not found: {}",
+                node_id
+            );
         }
     }
 
@@ -78,7 +90,10 @@ impl LoadBalancer {
                         drop(nodes);
                         let mut heap = self.heap.write().await;
                         heap.push(updated.clone());
-                        info!("Assigned task to node: {}. Task count: {}", updated.node_id, updated.task_count);
+                        info!(
+                            "Assigned task to node: {}. Task count: {}",
+                            updated.node_id, updated.task_count
+                        );
                         return Some(updated.node_id);
                     } else {
                         let updated = entry.clone();
@@ -104,9 +119,15 @@ impl LoadBalancer {
                 drop(nodes);
                 let mut heap = self.heap.write().await;
                 heap.push(updated.clone());
-                info!("Completed task on node: {}. Remaining task count: {}", node_id, updated.task_count);
+                info!(
+                    "Completed task on node: {}. Remaining task count: {}",
+                    node_id, updated.task_count
+                );
             } else {
-                info!("Completed task on node: {}. Remaining task count: 0", node_id);
+                info!(
+                    "Completed task on node: {}. Remaining task count: 0",
+                    node_id
+                );
             }
         } else {
             error!("Failed to complete task: Node not found: {}", node_id);
@@ -119,7 +140,10 @@ impl LoadBalancer {
     }
 }
 
-pub async fn monitor_node_load(mut rx: broadcast::Receiver<NodeLoadInfo>, load_balancer: LoadBalancer) {
+pub async fn monitor_node_load(
+    mut rx: broadcast::Receiver<NodeLoadInfo>,
+    load_balancer: LoadBalancer,
+) {
     while let Ok(node_load) = rx.recv().await {
         let mut nodes = load_balancer.nodes.write().await;
         if let Some(entry) = nodes.get_mut(&node_load.node_id) {
@@ -127,10 +151,21 @@ pub async fn monitor_node_load(mut rx: broadcast::Receiver<NodeLoadInfo>, load_b
             let updated = entry.clone();
             drop(nodes);
             let mut heap = load_balancer.heap.write().await;
+            let rebuilt: BinaryHeap<_> = heap
+                .drain()
+                .filter(|n| n.node_id != updated.node_id)
+                .collect();
+            *heap = rebuilt;
             heap.push(updated);
-            info!("Updated load info for node: {}. Task count: {}", node_load.node_id, node_load.task_count);
+            info!(
+                "Updated load info for node: {}. Task count: {}",
+                node_load.node_id, node_load.task_count
+            );
         } else {
-            error!("Node not found in load balancer for update: {}", node_load.node_id);
+            error!(
+                "Node not found in load balancer for update: {}",
+                node_load.node_id
+            );
         }
     }
 }
@@ -154,9 +189,15 @@ mod tests {
 
         {
             let mut nodes = load_balancer.nodes.write().await;
-            if let Some(n) = nodes.get_mut(&node1) { n.task_count = 5; }
-            if let Some(n) = nodes.get_mut(&node2) { n.task_count = 3; }
-            if let Some(n) = nodes.get_mut(&node3) { n.task_count = 1; }
+            if let Some(n) = nodes.get_mut(&node1) {
+                n.task_count = 5;
+            }
+            if let Some(n) = nodes.get_mut(&node2) {
+                n.task_count = 3;
+            }
+            if let Some(n) = nodes.get_mut(&node3) {
+                n.task_count = 1;
+            }
             let n1 = nodes.get(&node1).cloned().unwrap();
             let n2 = nodes.get(&node2).cloned().unwrap();
             let n3 = nodes.get(&node3).cloned().unwrap();
@@ -244,17 +285,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_remove_node_clears_heap_entries() {
+        let lb = LoadBalancer::new();
+        let node1 = Uuid::new_v4();
+        let node2 = Uuid::new_v4();
+        lb.add_node(node1).await;
+        lb.add_node(node2).await;
+        {
+            let mut heap = lb.heap.write().await;
+            if let Some(entry) = heap.iter().find(|n| n.node_id == node1).cloned() {
+                heap.push(entry);
+            }
+        }
+        lb.remove_node(&node1).await;
+        let heap = lb.heap.read().await;
+        assert!(heap.iter().all(|n| n.node_id != node1));
+        assert_eq!(heap.len(), 1);
+    }
+
+    #[tokio::test]
     async fn test_monitor_node_load_updates() {
         let lb = LoadBalancer::new();
         let node = Uuid::new_v4();
         lb.add_node(node).await;
         let (tx, rx) = broadcast::channel(1);
         let lb_clone = lb.clone();
-        tokio::spawn(async move { monitor_node_load(rx, lb_clone).await; });
-        tx.send(NodeLoadInfo { node_id: node, task_count: 4 }).unwrap();
+        tokio::spawn(async move {
+            monitor_node_load(rx, lb_clone).await;
+        });
+        tx.send(NodeLoadInfo {
+            node_id: node,
+            task_count: 4,
+        })
+        .unwrap();
         sleep(Duration::from_millis(50)).await;
         let nodes = lb.nodes.read().await;
         let count = nodes.get(&node).unwrap().task_count;
         assert_eq!(count, 4);
+    }
+
+    #[tokio::test]
+    async fn test_monitor_node_load_no_duplicates() {
+        let lb = LoadBalancer::new();
+        let node = Uuid::new_v4();
+        lb.add_node(node).await;
+        let (tx, rx) = broadcast::channel(2);
+        let lb_clone = lb.clone();
+        tokio::spawn(async move {
+            monitor_node_load(rx, lb_clone).await;
+        });
+        tx.send(NodeLoadInfo {
+            node_id: node,
+            task_count: 1,
+        })
+        .unwrap();
+        sleep(Duration::from_millis(50)).await;
+        tx.send(NodeLoadInfo {
+            node_id: node,
+            task_count: 3,
+        })
+        .unwrap();
+        sleep(Duration::from_millis(50)).await;
+        let heap = lb.heap.read().await;
+        assert_eq!(heap.len(), 1);
+        let entry = heap.peek().unwrap();
+        assert_eq!(entry.task_count, 3);
     }
 }
