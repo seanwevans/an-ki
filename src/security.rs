@@ -6,12 +6,13 @@ use base64::{engine::general_purpose, Engine as _};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, TokenData, Validation};
 use rand::RngCore;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use ring::pbkdf2::{self, PBKDF2_HMAC_SHA256};
 use ring::rand::SystemRandom;
 use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
-use webpki::{EndEntityCert, TrustAnchor, Time, ECDSA_P256_SHA256};
+use serde::{Deserialize, Serialize};
+use std::num::NonZeroU32;
 use std::time::{SystemTime, UNIX_EPOCH};
+use webpki::{EndEntityCert, Time, TrustAnchor, ECDSA_P256_SHA256};
 
 use std::env;
 use std::error::Error;
@@ -73,16 +74,29 @@ pub fn renew_token(token: &str, expiration_minutes: i64) -> Result<String, Box<d
     generate_token(sub, role, expiration_minutes)
 }
 
+const SALT_LEN: usize = 16;
+const NONCE_LEN: usize = 12;
+const PBKDF2_ITERATIONS: u32 = 100_000;
+
 pub fn encrypt_message(message: &str, key: &str) -> Result<String, Box<dyn Error>> {
-    // Derive a 256-bit key from the provided key string using SHA-256
-    let mut hasher = Sha256::new();
-    hasher.update(key.as_bytes());
-    let key_hash = hasher.finalize();
-    let cipher_key = Key::<Aes256Gcm>::from_slice(&key_hash);
+    // Generate a random salt for key derivation
+    let mut salt = [0u8; SALT_LEN];
+    rand::thread_rng().fill_bytes(&mut salt);
+
+    // Derive a 256-bit key using PBKDF2 with the salt
+    let mut derived_key = [0u8; 32];
+    pbkdf2::derive(
+        PBKDF2_HMAC_SHA256,
+        NonZeroU32::new(PBKDF2_ITERATIONS).unwrap(),
+        &salt,
+        key.as_bytes(),
+        &mut derived_key,
+    );
+    let cipher_key = Key::<Aes256Gcm>::from_slice(&derived_key);
     let cipher = Aes256Gcm::new(cipher_key);
 
-    // Generate a random 96-bit nonce
-    let mut nonce_bytes = [0u8; 12];
+    // Generate a random nonce
+    let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
@@ -91,8 +105,9 @@ pub fn encrypt_message(message: &str, key: &str) -> Result<String, Box<dyn Error
         .encrypt(nonce, message.as_bytes())
         .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
 
-    // Prepend the nonce to the ciphertext so it can be used for decryption
-    let mut combined = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
+    // Prepend salt and nonce to the ciphertext so they can be used for decryption
+    let mut combined = Vec::with_capacity(SALT_LEN + NONCE_LEN + ciphertext.len());
+    combined.extend_from_slice(&salt);
     combined.extend_from_slice(&nonce_bytes);
     combined.extend_from_slice(&ciphertext);
 
@@ -102,21 +117,27 @@ pub fn encrypt_message(message: &str, key: &str) -> Result<String, Box<dyn Error
 pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, Box<dyn Error>> {
     let decoded_bytes = general_purpose::STANDARD.decode(encoded_message)?;
 
-    if decoded_bytes.len() < 12 {
+    if decoded_bytes.len() < SALT_LEN + NONCE_LEN {
         return Err("Invalid encrypted message".into());
     }
 
-    // Derive the same 256-bit key from the provided key string
-    let mut hasher = Sha256::new();
-    hasher.update(key.as_bytes());
-    let key_hash = hasher.finalize();
-    let cipher_key = Key::<Aes256Gcm>::from_slice(&key_hash);
+    // Split salt, nonce, and ciphertext
+    let (salt, rest) = decoded_bytes.split_at(SALT_LEN);
+    let (nonce_bytes, ciphertext) = rest.split_at(NONCE_LEN);
+
+    // Derive the same 256-bit key using PBKDF2 with the salt
+    let mut derived_key = [0u8; 32];
+    pbkdf2::derive(
+        PBKDF2_HMAC_SHA256,
+        NonZeroU32::new(PBKDF2_ITERATIONS).unwrap(),
+        salt,
+        key.as_bytes(),
+        &mut derived_key,
+    );
+    let cipher_key = Key::<Aes256Gcm>::from_slice(&derived_key);
     let cipher = Aes256Gcm::new(cipher_key);
 
-    // Split nonce and ciphertext
-    let (nonce_bytes, ciphertext) = decoded_bytes.split_at(12);
     let nonce = Nonce::from_slice(nonce_bytes);
-
     let plaintext = cipher
         .decrypt(nonce, ciphertext)
         .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
@@ -130,9 +151,16 @@ pub fn validate_certificate(cert_der: &[u8], ca_der: &[u8]) -> Result<(), Box<dy
     let anchors = [anchor];
     let trust_anchors = webpki::TlsServerTrustAnchors(&anchors);
     let cert = EndEntityCert::try_from(cert_der).map_err(|e| e.to_string())?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?;
-    cert.verify_is_valid_tls_server_cert(&[&ECDSA_P256_SHA256], &trust_anchors, &[], Time::from_seconds_since_unix_epoch(now.as_secs()))
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?;
+    cert.verify_is_valid_tls_server_cert(
+        &[&ECDSA_P256_SHA256],
+        &trust_anchors,
+        &[],
+        Time::from_seconds_since_unix_epoch(now.as_secs()),
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -151,7 +179,11 @@ pub fn sign_challenge(challenge: &[u8], key_der: &[u8]) -> Result<Vec<u8>, Box<d
 }
 
 /// Verifies a signed challenge using the peer's certificate DER bytes.
-pub fn verify_challenge(challenge: &[u8], signature: &[u8], cert_der: &[u8]) -> Result<(), Box<dyn Error>> {
+pub fn verify_challenge(
+    challenge: &[u8],
+    signature: &[u8],
+    cert_der: &[u8],
+) -> Result<(), Box<dyn Error>> {
     let cert = EndEntityCert::try_from(cert_der).map_err(|e| e.to_string())?;
     cert.verify_signature(&ECDSA_P256_SHA256, challenge, signature)
         .map_err(|e| e.to_string())?;
@@ -161,10 +193,13 @@ pub fn verify_challenge(challenge: &[u8], signature: &[u8], cert_der: &[u8]) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        encrypt_message, decrypt_message, generate_token, verify_token, renew_token, Claims,
-        validate_certificate, generate_challenge, sign_challenge, verify_challenge,
+        decrypt_message, encrypt_message, generate_challenge, generate_token, renew_token,
+        sign_challenge, validate_certificate, verify_challenge, verify_token, Claims,
     };
-    use rcgen::{Certificate as RcCertificate, CertificateParams, IsCa, BasicConstraints, ExtendedKeyUsagePurpose};
+    use rcgen::{
+        BasicConstraints, Certificate as RcCertificate, CertificateParams, ExtendedKeyUsagePurpose,
+        IsCa,
+    };
 
     #[test]
     fn test_generate_and_verify_token() {
@@ -173,7 +208,11 @@ mod tests {
         let role = "teacher";
         let token = generate_token(node_id, role, 60).unwrap();
         let token_data = verify_token(&token).unwrap();
-        let Claims { sub, role: claim_role, .. } = token_data.claims;
+        let Claims {
+            sub,
+            role: claim_role,
+            ..
+        } = token_data.claims;
 
         assert_eq!(sub, node_id);
         assert_eq!(claim_role, role);
@@ -183,12 +222,20 @@ mod tests {
     fn test_encrypt_and_decrypt_message() {
         let message = "This is a secret message.";
         let key = "encryption_key";
+        let encrypted_message1 = encrypt_message(message, key).unwrap();
+        let encrypted_message2 = encrypt_message(message, key).unwrap();
 
-        let encrypted_message = encrypt_message(message, key).unwrap();
-        assert_ne!(encrypted_message, message);
-        let decrypted_message = decrypt_message(&encrypted_message, key).unwrap();
+        // Different salts and nonces should produce different ciphertexts
+        assert_ne!(encrypted_message1, encrypted_message2);
 
-        assert_eq!(decrypted_message, message);
+        let decrypted_message1 = decrypt_message(&encrypted_message1, key).unwrap();
+        let decrypted_message2 = decrypt_message(&encrypted_message2, key).unwrap();
+
+        assert_eq!(decrypted_message1, message);
+        assert_eq!(decrypted_message2, message);
+
+        // Decryption should fail with an incorrect key
+        assert!(decrypt_message(&encrypted_message1, "wrong_key").is_err());
     }
 
     #[test]

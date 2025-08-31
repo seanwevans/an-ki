@@ -2,17 +2,20 @@
 
 use std::error::Error;
 
-use crate::{common::{Task, TaskType}, config::load_settings, messaging, signals};
+use crate::{
+    common::{Task, TaskType},
+    config::load_settings,
+    messaging, signals,
+};
 use futures_util::stream::StreamExt;
 use lapin::{
     options::{BasicAckOptions, BasicNackOptions},
     Channel, Consumer,
 };
-use tokio::sync::oneshot;
+use lazy_static::lazy_static;
+use tokio::sync::{oneshot, Mutex};
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};
-use lazy_static::lazy_static;
-use std::sync::Mutex;
 use uuid::Uuid;
 
 lazy_static! {
@@ -140,36 +143,46 @@ async fn setup_consumer(
     Ok((channel, consumer))
 }
 
-async fn process_task(task: Task, channel: Option<&Channel>, shard_count: usize) -> Result<(), Box<dyn Error>> {
+async fn process_task(
+    task: Task,
+    channel: Option<&Channel>,
+    shard_count: usize,
+) -> Result<(), Box<dyn Error>> {
     match task.task_type {
         TaskType::GradientUpdate => {
             let gradient: Vec<f32> = serde_json::from_str(&task.data)?;
-            let mut acc = GRAD_ACCUM.lock().unwrap();
-            if acc.0.is_empty() {
-                acc.0 = vec![0.0; gradient.len()];
-            }
-            for (a, g) in acc.0.iter_mut().zip(&gradient) {
-                *a += g;
-            }
-            acc.1 += 1;
-            if acc.1 >= shard_count {
-                let mut model = MODEL_PARAMS.lock().unwrap();
-                if model.is_empty() {
-                    model.resize(acc.0.len(), 0.0);
+            let broadcast_data = {
+                let mut acc = GRAD_ACCUM.lock().await;
+                if acc.0.is_empty() {
+                    acc.0 = vec![0.0; gradient.len()];
                 }
-                for (m, a) in model.iter_mut().zip(acc.0.iter()) {
-                    *m -= *a / shard_count as f32;
+                for (a, g) in acc.0.iter_mut().zip(&gradient) {
+                    *a += g;
                 }
-                acc.0.iter_mut().for_each(|v| *v = 0.0);
-                acc.1 = 0;
-                if let Some(ch) = channel {
-                    broadcast_model(&model, ch).await?;
+                acc.1 += 1;
+                if acc.1 >= shard_count {
+                    let mut model = MODEL_PARAMS.lock().await;
+                    if model.is_empty() {
+                        model.resize(acc.0.len(), 0.0);
+                    }
+                    for (m, a) in model.iter_mut().zip(acc.0.iter()) {
+                        *m -= *a / shard_count as f32;
+                    }
+                    let model_clone = model.clone();
+                    acc.0.iter_mut().for_each(|v| *v = 0.0);
+                    acc.1 = 0;
+                    Some(model_clone)
+                } else {
+                    None
                 }
+            };
+            if let (Some(ch), Some(model)) = (channel, broadcast_data) {
+                broadcast_model(&model, ch).await?;
             }
         }
         TaskType::ParameterPull => {
             if let Some(ch) = channel {
-                let model = MODEL_PARAMS.lock().unwrap().clone();
+                let model = MODEL_PARAMS.lock().await.clone();
                 broadcast_model(&model, ch).await?;
             }
         }
@@ -193,8 +206,8 @@ async fn broadcast_model(model: &[f32], channel: &Channel) -> Result<(), Box<dyn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{timeout, Duration};
     use crate::common::{Task, TaskType};
+    use tokio::time::{timeout, Duration};
 
     #[tokio::test]
     async fn test_process_task_ok() {

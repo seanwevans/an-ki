@@ -17,6 +17,7 @@ tch = ["dep:tch"]
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full", "signal"] }
+tokio-util = { version = "0.7" }
 
 # Message passing (RabbitMQ)
 lapin = "2.0"
