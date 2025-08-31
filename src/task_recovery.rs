@@ -29,10 +29,11 @@ impl TaskRecoveryManager {
 
         match self.pool.get().await {
             Ok(conn) => {
+                let task_type = format!("{:?}", task.task_type);
                 if let Err(e) = conn
                     .execute(
-                        "UPSERT INTO tasks (task_id, data) VALUES ($1, $2)",
-                        &[&task.task_id, &task.data],
+                        "UPSERT INTO tasks (task_id, task_type, data) VALUES ($1, $2, $3)",
+                        &[&task.task_id, &task_type, &task.data],
                     )
                     .await
                 {
@@ -65,13 +66,31 @@ impl TaskRecoveryManager {
 
     pub async fn recover_tasks(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let conn = self.pool.get().await?;
-        let rows = conn.query("SELECT task_id, data FROM tasks", &[]).await?;
+        let rows = conn
+            .query("SELECT task_id, task_type, data FROM tasks", &[])
+            .await?;
         let mut tasks = self.tasks.write().await;
         tasks.clear();
         for row in rows {
             let task_id: Uuid = row.get("task_id");
+            let task_type_str: String = row.get("task_type");
             let data: String = row.get("data");
-            tasks.insert(task_id, Task { task_id, data });
+            let task_type = match task_type_str.as_str() {
+                "GradientUpdate" => TaskType::GradientUpdate,
+                "ParameterPull" => TaskType::ParameterPull,
+                other => {
+                    error!("Unknown task_type '{}' for task {}", other, task_id);
+                    continue;
+                }
+            };
+            tasks.insert(
+                task_id,
+                Task {
+                    task_id,
+                    task_type,
+                    data,
+                },
+            );
         }
         info!("Recovered tasks from database.");
         Ok(())
@@ -100,11 +119,10 @@ mod tests {
         // Recover tasks from database
         recovery_manager.add_task(task.clone()).await;
         recovery_manager.recover_tasks().await.unwrap();
-        assert!(recovery_manager
-            .tasks
-            .read()
-            .await
-            .contains_key(&task.task_id));
+        let tasks = recovery_manager.tasks.read().await;
+        let recovered = tasks.get(&task.task_id).expect("task missing");
+        assert_eq!(recovered.task_type, TaskType::ParameterPull);
+        assert_eq!(recovered.data, "Test data");
 
         // Clean up
         pool.get()
