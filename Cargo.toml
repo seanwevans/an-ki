@@ -55,6 +55,9 @@ aes-gcm = { version = "0.10", features = ["std"] }
 rand = "0.8"
 # Testing framework for lazy static initialization
 lazy_static = "1.4"
+openraft = { version = "0.9", features = ["serde", "type-alias"] }
+openraft-memstore = "0.9"
+sled = "0.34"
 
 [dev-dependencies]
 # Testing utilities
