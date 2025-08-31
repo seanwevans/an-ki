@@ -9,6 +9,10 @@ license = "MIT"
 
 [features]
 integration-tests = []
+# Enable basic tensor computations with the `tch` crate when the `tch` feature
+# is activated. Keeping it optional avoids pulling in the heavy dependency for
+# default builds.
+tch = ["dep:tch"]
 
 [dependencies]
 # Async runtime
@@ -55,6 +59,7 @@ aes-gcm = { version = "0.10", features = ["std"] }
 rand = "0.8"
 # Testing framework for lazy static initialization
 lazy_static = "1.4"
+tch = { version = "0.14", optional = true }
 
 [dev-dependencies]
 # Testing utilities

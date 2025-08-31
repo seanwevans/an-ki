@@ -4,7 +4,7 @@ use crate::signals;
 use crate::messaging::{consume_messages, declare_queue, establish_connection, publish_message};
 
 use futures_util::stream::StreamExt;
-use lapin::options::BasicAckOptions;
+use lapin::{options::BasicAckOptions, Channel, Connection, ConnectionProperties};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tokio::sync::oneshot;
@@ -37,18 +37,15 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         let _ = shutdown_tx.send(());
     });
 
-    // Establish connection to RabbitMQ
-    let amqp_addr = std::env::var("AMQP_ADDR").map_err(|e| {
-        error!("Failed to read AMQP_ADDR environment variable: {:?}", e);
-
     // Establish connection to RabbitMQ using configuration settings
     let settings = load_settings().map_err(|e| {
         error!("Failed to load settings: {:?}", e);
-
         e
     })?;
 
-    let connection = Connection::connect(&settings.amqp_addr, ConnectionProperties::default())
+    let amqp_addr = std::env::var("AMQP_ADDR").unwrap_or(settings.amqp_addr.clone());
+
+    let connection = Connection::connect(&amqp_addr, ConnectionProperties::default())
         .await
         .map_err(|e| {
             error!("Failed to connect to RabbitMQ: {:?}", e);
