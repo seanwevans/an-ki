@@ -3,6 +3,7 @@
 use crate::common::{Task, TaskType};
 use crate::task_recovery::TaskRecoveryManager;
 use std::sync::Arc;
+use tracing::error;
 use uuid::Uuid;
 use warp::http::StatusCode;
 use warp::Filter;
@@ -53,8 +54,16 @@ async fn get_task_handler(
 ) -> Result<impl warp::Reply, warp::Rejection> {
     let tasks = task_manager.tasks.read().await;
     if let Some(task) = tasks.get(&task_id) {
-        let body = serde_json::to_string(task).unwrap_or_default();
-        Ok(warp::reply::with_status(body, StatusCode::OK))
+        match serde_json::to_string(task) {
+            Ok(body) => Ok(warp::reply::with_status(body, StatusCode::OK)),
+            Err(e) => {
+                error!("Failed to serialize task: {}", e);
+                Ok(warp::reply::with_status(
+                    "Internal server error".to_string(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ))
+            }
+        }
     } else {
         Ok(warp::reply::with_status(
             "Task not found".to_string(),
