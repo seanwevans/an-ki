@@ -1,7 +1,7 @@
 // testing.rs: Implements integration tests for the distributed neural network system.
 
 use crate::task_recovery::TaskRecoveryManager;
-use crate::common::Task;
+use crate::common::{Task, TaskType};
 use crate::api::Api;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -16,6 +16,7 @@ async fn test_task_recovery_persistence() {
 
     let task = Task {
         task_id: Uuid::new_v4(),
+        task_type: TaskType::ParameterPull,
         data: "Persistent task data".to_string(),
     };
 
@@ -46,6 +47,7 @@ async fn test_task_api_add_and_get() {
 
     let new_task = Task {
         task_id: Uuid::new_v4(),
+        task_type: TaskType::ParameterPull,
         data: "Integration test task data".to_string(),
     };
 
@@ -78,6 +80,7 @@ async fn test_task_api_delete() {
 
     let task = Task {
         task_id: Uuid::new_v4(),
+        task_type: TaskType::ParameterPull,
         data: "Delete test task data".to_string(),
     };
     task_manager.add_task(task.clone()).await;
@@ -109,6 +112,7 @@ async fn test_recovery_after_crash() {
 
     let task = Task {
         task_id: Uuid::new_v4(),
+        task_type: TaskType::ParameterPull,
         data: "Recovery after crash task data".to_string(),
     };
 

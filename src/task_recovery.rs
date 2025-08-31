@@ -1,6 +1,6 @@
 // task_recovery.rs: Implements task persistence and recovery for robustness.
 
-use crate::common::Task;
+use crate::common::{Task, TaskType};
 use crate::database::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -90,6 +90,7 @@ mod tests {
 
         let task = Task {
             task_id: Uuid::new_v4(),
+            task_type: TaskType::ParameterPull,
             data: "Test data".to_string(),
         };
 

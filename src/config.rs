@@ -11,6 +11,10 @@ pub struct Settings {
     pub amqp_addr: String,
     pub jwt_secret_key: String,
     pub database_url: String,
+    /// Number of model shards expected when aggregating gradients.
+    pub model_shards: usize,
+    /// Number of training epochs the scheduler should execute.
+    pub training_epochs: u32,
 }
 
 impl Settings {
@@ -71,5 +75,7 @@ mod tests {
         assert!(!settings.amqp_addr.is_empty());
         assert!(!settings.jwt_secret_key.is_empty());
         assert!(!settings.database_url.is_empty());
+        assert!(settings.model_shards > 0);
+        assert!(settings.training_epochs > 0);
     }
 }

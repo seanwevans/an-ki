@@ -6,3 +6,5 @@
 amqp_addr = "amqp://127.0.0.1:5672/%2f"
 jwt_secret_key = "change-me"
 database_url = "postgresql://root@localhost:26257/defaultdb?sslmode=disable"
+model_shards = 1
+training_epochs = 10

@@ -9,6 +9,10 @@ license = "MIT"
 
 [features]
 integration-tests = []
+# Enable basic tensor computations with the `tch` crate when the `tch` feature
+# is activated. Keeping it optional avoids pulling in the heavy dependency for
+# default builds.
+tch = ["dep:tch"]
 
 [dependencies]
 # Async runtime
@@ -64,6 +68,7 @@ rustls-pemfile = "1.0"
 clap = { version = "4.4", features = ["derive"] }
 # Testing framework for lazy static initialization
 lazy_static = "1.4"
+tch = { version = "0.14", optional = true }
 openraft = { version = "0.9", features = ["serde", "type-alias"] }
 openraft-memstore = "0.9"
 sled = "0.34"

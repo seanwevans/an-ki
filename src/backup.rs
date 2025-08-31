@@ -1,6 +1,6 @@
 // backup.rs: Implements a backup mechanism for task persistence to enhance robustness and redundancy.
 
-use crate::common::Task;
+use crate::common::{Task, TaskType};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -72,6 +72,7 @@ mod tests {
 
         let task = Task {
             task_id: Uuid::new_v4(),
+            task_type: TaskType::ParameterPull,
             data: "Backup test task data".to_string(),
         };
         backup_manager.tasks.write().await.insert(task.task_id, task.clone());

@@ -2,21 +2,22 @@
 
 use std::error::Error;
 
-use crate::{config::load_settings, messaging, signals};
+use crate::{common::{Task, TaskType}, config::load_settings, messaging, signals};
 use futures_util::stream::StreamExt;
 use lapin::{
     options::{BasicAckOptions, BasicNackOptions},
     Channel, Consumer,
 };
-use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};
+use lazy_static::lazy_static;
+use std::sync::Mutex;
+use uuid::Uuid;
 
-#[derive(Serialize, Deserialize, Debug)]
-struct TaskMessage {
-    task_id: String,
-    data: String,
+lazy_static! {
+    static ref MODEL_PARAMS: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+    static ref GRAD_ACCUM: Mutex<(Vec<f32>, usize)> = Mutex::new((Vec::new(), 0));
 }
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
@@ -37,7 +38,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         error!("Failed to load settings: {:?}", e);
         e
     })?;
-    let amqp_addr = settings.amqp_addr;
+    let amqp_addr = settings.amqp_addr.clone();
+    let shard_count = settings.model_shards;
 
     let max_retries: u32 = std::env::var("AMQP_RECONNECT_ATTEMPTS")
         .unwrap_or_else(|_| "5".into())
@@ -53,7 +55,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let mut attempts = 0u32;
 
     loop {
-        let (_channel, mut consumer) =
+        let (channel, mut consumer) =
             match setup_consumer(&amqp_addr, queue_name, consumer_tag).await {
                 Ok(c) => {
                     attempts = 0;
@@ -86,10 +88,10 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 delivery = consumer.next() => {
                     match delivery {
                         Some(Ok(delivery)) => {
-                            match serde_json::from_slice::<TaskMessage>(&delivery.data) {
+                            match serde_json::from_slice::<Task>(&delivery.data) {
                                 Ok(task_message) => {
                                     info!("Received task: {:?}", task_message);
-                                    if let Err(e) = process_task(task_message).await {
+                                    if let Err(e) = process_task(task_message, Some(&channel), shard_count).await {
                                         error!("Failed to process task: {:?}", e);
                                     }
                                     if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
@@ -138,8 +140,53 @@ async fn setup_consumer(
     Ok((channel, consumer))
 }
 
-async fn process_task(task: TaskMessage) -> Result<(), Box<dyn Error>> {
-    info!("Processing task with ID: {}", task.task_id);
+async fn process_task(task: Task, channel: Option<&Channel>, shard_count: usize) -> Result<(), Box<dyn Error>> {
+    match task.task_type {
+        TaskType::GradientUpdate => {
+            let gradient: Vec<f32> = serde_json::from_str(&task.data)?;
+            let mut acc = GRAD_ACCUM.lock().unwrap();
+            if acc.0.is_empty() {
+                acc.0 = vec![0.0; gradient.len()];
+            }
+            for (a, g) in acc.0.iter_mut().zip(&gradient) {
+                *a += g;
+            }
+            acc.1 += 1;
+            if acc.1 >= shard_count {
+                let mut model = MODEL_PARAMS.lock().unwrap();
+                if model.is_empty() {
+                    model.resize(acc.0.len(), 0.0);
+                }
+                for (m, a) in model.iter_mut().zip(acc.0.iter()) {
+                    *m -= *a / shard_count as f32;
+                }
+                acc.0.iter_mut().for_each(|v| *v = 0.0);
+                acc.1 = 0;
+                if let Some(ch) = channel {
+                    broadcast_model(&model, ch).await?;
+                }
+            }
+        }
+        TaskType::ParameterPull => {
+            if let Some(ch) = channel {
+                let model = MODEL_PARAMS.lock().unwrap().clone();
+                broadcast_model(&model, ch).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn broadcast_model(model: &[f32], channel: &Channel) -> Result<(), Box<dyn Error>> {
+    let task = Task {
+        task_id: Uuid::new_v4(),
+        task_type: TaskType::ParameterPull,
+        data: serde_json::to_string(model)?,
+    };
+    messaging::declare_queue(channel, "ki_model_queue").await?;
+    let payload = serde_json::to_vec(&task)?;
+    messaging::publish_message(channel, "ki_model_queue", &payload).await?;
+    info!("Broadcasted model update");
     Ok(())
 }
 
@@ -147,14 +194,16 @@ async fn process_task(task: TaskMessage) -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::*;
     use tokio::time::{timeout, Duration};
+    use crate::common::{Task, TaskType};
 
     #[tokio::test]
     async fn test_process_task_ok() {
-        let task = TaskMessage {
-            task_id: "1".into(),
-            data: "data".into(),
+        let task = Task {
+            task_id: Uuid::new_v4(),
+            task_type: TaskType::GradientUpdate,
+            data: serde_json::to_string(&vec![0.1_f32, 0.2_f32]).unwrap(),
         };
-        assert!(process_task(task).await.is_ok());
+        assert!(process_task(task, None, 1).await.is_ok());
     }
 
     #[tokio::test]
