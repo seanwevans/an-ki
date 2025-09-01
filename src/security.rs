@@ -5,6 +5,7 @@ use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, TokenData, Validation};
+use rand::rngs::OsRng;
 use rand::RngCore;
 use ring::pbkdf2::{self, PBKDF2_HMAC_SHA256};
 use ring::rand::SystemRandom;
@@ -81,9 +82,9 @@ const NONCE_LEN: usize = 12;
 const PBKDF2_ITERATIONS: u32 = 100_000;
 
 pub fn encrypt_message(message: &str, key: &str) -> Result<String, Box<dyn Error>> {
-    // Generate a random salt for key derivation
+    // Generate a random salt for key derivation using a secure RNG
     let mut salt = [0u8; SALT_LEN];
-    rand::thread_rng().fill_bytes(&mut salt);
+    OsRng.fill_bytes(&mut salt);
 
     // Derive a 256-bit key using PBKDF2 with the salt
     let mut derived_key = [0u8; 32];
@@ -97,9 +98,9 @@ pub fn encrypt_message(message: &str, key: &str) -> Result<String, Box<dyn Error
     let cipher_key = Key::<Aes256Gcm>::from_slice(&derived_key);
     let cipher = Aes256Gcm::new(cipher_key);
 
-    // Generate a random nonce
+    // Generate a random nonce using a secure RNG
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
     // Encrypt the message
