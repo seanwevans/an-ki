@@ -124,6 +124,11 @@ impl LoadBalancer {
                 let updated = entry.clone();
                 drop(nodes);
                 let mut heap = self.heap.write().await;
+                let rebuilt: BinaryHeap<_> = heap
+                    .drain()
+                    .filter(|n| n.node_id != updated.node_id)
+                    .collect();
+                *heap = rebuilt;
                 heap.push(updated.clone());
                 info!(
                     "Completed task on node: {}. Remaining task count: {}",
@@ -251,6 +256,35 @@ mod tests {
             let count = nodes.get(&node).unwrap().task_count;
             assert_eq!(count, 0);
         }
+    }
+
+    #[tokio::test]
+    async fn test_complete_task_no_duplicate_heap_entries() {
+        let lb = LoadBalancer::new();
+        let node = Uuid::new_v4();
+
+        lb.add_node(node).await;
+
+        {
+            let mut nodes = lb.nodes.write().await;
+            if let Some(info) = nodes.get_mut(&node) {
+                info.task_count = 3;
+            }
+            let n = nodes.get(&node).cloned().unwrap();
+            drop(nodes);
+            let mut heap = lb.heap.write().await;
+            heap.clear();
+            heap.push(n);
+        }
+
+        for _ in 0..5 {
+            lb.complete_task(&node).await;
+        }
+
+        let heap = lb.heap.read().await;
+        assert_eq!(heap.len(), 1);
+        let entry = heap.peek().unwrap();
+        assert_eq!(entry.task_count, 0);
     }
 
     #[tokio::test]
