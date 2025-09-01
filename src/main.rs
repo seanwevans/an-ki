@@ -8,6 +8,7 @@ mod api;
 mod backup;
 mod common;
 mod config;
+mod database;
 mod dht;
 mod ki_node;
 mod load_balancer;
