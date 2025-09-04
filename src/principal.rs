@@ -66,10 +66,14 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     // Declare the queue for receiving update requests from An nodes
     let queue_name = "principal_update_queue";
-    declare_queue(&channel, queue_name).await?;
+    declare_queue(&channel, queue_name)
+        .await
+        .map_err(|e| Box::<dyn Error>::from(e))?;
 
     // Start consuming update requests from the queue
-    let mut consumer = consume_messages(&channel, queue_name, "principal_consumer").await?;
+    let mut consumer = consume_messages(&channel, queue_name, "principal_consumer")
+        .await
+        .map_err(|e| Box::<dyn Error>::from(e))?;
 
     info!("Principal node is running and waiting for update requests...");
 

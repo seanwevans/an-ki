@@ -17,8 +17,8 @@ use webpki::{EndEntityCert, Time, TrustAnchor, ECDSA_P256_SHA256};
 
 use once_cell::sync::OnceCell;
 use std::env;
-use std::error::Error;
 use tracing::info;
+use crate::error::AnKiError;
 
 use crate::common::NodeRole;
 use crate::error::AnKiError;
@@ -30,23 +30,15 @@ pub struct Claims {
     pub exp: usize,     // Expiration time as a UNIX timestamp
 }
 
-static JWT_SECRET_KEY: OnceCell<String> = OnceCell::new();
-
-fn get_secret_key() -> Result<&'static str, Box<dyn Error>> {
-    JWT_SECRET_KEY
-        .get_or_try_init(|| {
-            env::var("JWT_SECRET_KEY").map_err(|_| {
-                Box::<dyn Error>::from("JWT_SECRET_KEY environment variable is not set")
-            })
-        })
-        .map(|s| s.as_str())
+fn get_secret_key() -> Result<String, AnKiError> {
+    env::var("JWT_SECRET_KEY").map_err(|e| AnKiError::Config(e.to_string()))
 }
 
 pub fn generate_token(
     node_id: &str,
     role: NodeRole,
     expiration_minutes: i64,
-) -> Result<String, Box<dyn Error>> {
+) -> Result<String, AnKiError> {
     let expiration = Utc::now() + Duration::minutes(expiration_minutes);
     let claims = Claims {
         sub: node_id.to_owned(),
@@ -58,8 +50,9 @@ pub fn generate_token(
     let token = encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(secret_key.as_bytes()),
-    )?;
+        &EncodingKey::from_secret(secret_key.as_ref()),
+    )
+    .map_err(|e| AnKiError::Security(e.to_string()))?;
     info!(
         "Generated token for node_id: {} with role: {:?}",
         node_id, claims.role
@@ -67,13 +60,14 @@ pub fn generate_token(
     Ok(token)
 }
 
-pub fn verify_token(token: &str) -> Result<TokenData<Claims>, Box<dyn Error>> {
+pub fn verify_token(token: &str) -> Result<TokenData<Claims>, AnKiError> {
     let secret_key = get_secret_key()?;
     let token_data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret_key.as_bytes()),
         &Validation::default(),
-    )?;
+    )
+    .map_err(|e| AnKiError::Security(e.to_string()))?;
     info!(
         "Verified token for node_id: {} with role: {:?}",
         token_data.claims.sub, token_data.claims.role
@@ -81,7 +75,7 @@ pub fn verify_token(token: &str) -> Result<TokenData<Claims>, Box<dyn Error>> {
     Ok(token_data)
 }
 
-pub fn renew_token(token: &str, expiration_minutes: i64) -> Result<String, Box<dyn Error>> {
+pub fn renew_token(token: &str, expiration_minutes: i64) -> Result<String, AnKiError> {
     let token_data = verify_token(token)?;
     let Claims { sub, role, .. } = &token_data.claims;
     generate_token(sub, role.clone(), expiration_minutes)
@@ -91,7 +85,7 @@ const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const PBKDF2_ITERATIONS: u32 = 100_000;
 
-pub fn encrypt_message(message: &str, key: &str) -> Result<String, Box<dyn Error>> {
+pub fn encrypt_message(message: &str, key: &str) -> Result<String, AnKiError> {
     // Generate a random salt for key derivation using a secure RNG
     let mut salt = [0u8; SALT_LEN];
     OsRng.fill_bytes(&mut salt);
@@ -116,7 +110,7 @@ pub fn encrypt_message(message: &str, key: &str) -> Result<String, Box<dyn Error
     // Encrypt the message
     let ciphertext = cipher
         .encrypt(nonce, message.as_bytes())
-        .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
+        .map_err(|e| AnKiError::Security(e.to_string()))?;
 
     // Prepend salt and nonce to the ciphertext so they can be used for decryption
     let mut combined = Vec::with_capacity(SALT_LEN + NONCE_LEN + ciphertext.len());
@@ -130,10 +124,10 @@ pub fn encrypt_message(message: &str, key: &str) -> Result<String, Box<dyn Error
 pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, AnKiError> {
     let decoded_bytes = general_purpose::STANDARD
         .decode(encoded_message)
-        .map_err(|e| AnKiError::CryptoError(e.to_string()))?;
+        .map_err(|e| AnKiError::Security(e.to_string()))?;
 
     if decoded_bytes.len() < SALT_LEN + NONCE_LEN {
-        return Err(AnKiError::InvalidCiphertext);
+        return Err(AnKiError::Security("Invalid encrypted message".into()));
     }
 
     // Split salt, nonce, and ciphertext
@@ -155,28 +149,30 @@ pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, AnKiE
     let nonce = Nonce::from_slice(nonce_bytes);
     let plaintext = cipher
         .decrypt(nonce, ciphertext)
-        .map_err(|e| AnKiError::CryptoError(e.to_string()))?;
+        .map_err(|e| AnKiError::Security(e.to_string()))?;
     let decrypted_message = String::from_utf8(plaintext)
-        .map_err(|e| AnKiError::CryptoError(e.to_string()))?;
+        .map_err(|e| AnKiError::Security(e.to_string()))?;
     Ok(decrypted_message)
 }
 
 /// Validates `cert_der` against the provided CA certificate `ca_der`.
-pub fn validate_certificate(cert_der: &[u8], ca_der: &[u8]) -> Result<(), Box<dyn Error>> {
-    let anchor = TrustAnchor::try_from_cert_der(ca_der).map_err(|e| e.to_string())?;
+pub fn validate_certificate(cert_der: &[u8], ca_der: &[u8]) -> Result<(), AnKiError> {
+    let anchor = TrustAnchor::try_from_cert_der(ca_der)
+        .map_err(|e| AnKiError::Security(e.to_string()))?;
     let anchors = [anchor];
     let trust_anchors = webpki::TlsServerTrustAnchors(&anchors);
-    let cert = EndEntityCert::try_from(cert_der).map_err(|e| e.to_string())?;
+    let cert = EndEntityCert::try_from(cert_der)
+        .map_err(|e| AnKiError::Security(e.to_string()))?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| AnKiError::Security(e.to_string()))?;
     cert.verify_is_valid_tls_server_cert(
         &[&ECDSA_P256_SHA256],
         &trust_anchors,
         &[],
         Time::from_seconds_since_unix_epoch(now.as_secs()),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| AnKiError::Security(e.to_string()))?;
     Ok(())
 }
 
@@ -188,9 +184,12 @@ pub fn generate_challenge() -> [u8; 32] {
 }
 
 /// Signs the `challenge` using the node's private key in DER format.
-pub fn sign_challenge(challenge: &[u8], key_der: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
-    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, key_der)?;
-    let sig = key_pair.sign(&SystemRandom::new(), challenge)?;
+pub fn sign_challenge(challenge: &[u8], key_der: &[u8]) -> Result<Vec<u8>, AnKiError> {
+    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, key_der)
+        .map_err(|e| AnKiError::Security(e.to_string()))?;
+    let sig = key_pair
+        .sign(&SystemRandom::new(), challenge)
+        .map_err(|e| AnKiError::Security(e.to_string()))?;
     Ok(sig.as_ref().to_vec())
 }
 
@@ -199,10 +198,11 @@ pub fn verify_challenge(
     challenge: &[u8],
     signature: &[u8],
     cert_der: &[u8],
-) -> Result<(), Box<dyn Error>> {
-    let cert = EndEntityCert::try_from(cert_der).map_err(|e| e.to_string())?;
+) -> Result<(), AnKiError> {
+    let cert = EndEntityCert::try_from(cert_der)
+        .map_err(|e| AnKiError::Security(e.to_string()))?;
     cert.verify_signature(&ECDSA_P256_SHA256, challenge, signature)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| AnKiError::Security(e.to_string()))?;
     Ok(())
 }
 

@@ -5,15 +5,13 @@
 
 use crate::common::{Task, TaskType};
 use crate::database::PgPool;
+use crate::error::AnKiError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info};
 use uuid::Uuid;
 
-type Error = Box<dyn std::error::Error + Send + Sync>;
-
-/// Persists tasks to durable storage and reloads them on startup.
 #[derive(Clone)]
 pub struct TaskRecoveryManager {
     /// In-memory cache of tasks keyed by ID.
@@ -40,14 +38,7 @@ impl TaskRecoveryManager {
     /// the write lock is not held across an await. If persistence fails at any stage,
     /// the in-memory insertion is rolled back and an error is returned so callers can
     /// react accordingly.
-    ///
-    /// # Parameters
-    /// * `task` - Task to persist.
-    ///
-    /// # Errors
-    /// Returns an error if a database connection cannot be acquired or the insert
-    /// statement fails.
-    pub async fn add_task(&self, task: Task) -> Result<(), Error> {
+    pub async fn add_task(&self, task: Task) -> Result<(), AnKiError> {
         let mut tasks = self.tasks.write().await;
         tasks.insert(task.task_id, task.clone());
         info!("Added task to recovery manager: {:?}", task);
@@ -62,7 +53,7 @@ impl TaskRecoveryManager {
                 error!("Failed to acquire connection: {:?}", e);
                 let mut tasks = self.tasks.write().await;
                 tasks.remove(&task.task_id);
-                return Err(Box::new(e));
+                return Err(AnKiError::TaskRecovery(e.to_string()));
             }
         };
 
@@ -78,7 +69,7 @@ ON CONFLICT (task_id) DO UPDATE SET task_type=$2, data=$3",
             error!("Failed to persist task: {:?}", e);
             let mut tasks = self.tasks.write().await;
             tasks.remove(&task.task_id);
-            return Err(Box::new(e));
+            return Err(AnKiError::TaskRecovery(e.to_string()));
         }
 
         Ok(())
@@ -108,15 +99,16 @@ ON CONFLICT (task_id) DO UPDATE SET task_type=$2, data=$3",
         }
     }
 
-    /// Reloads all tasks from the database into memory.
-    ///
-    /// # Errors
-    /// Returns an error if the query to fetch tasks fails.
-    pub async fn recover_tasks(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.pool.get().await?;
+    pub async fn recover_tasks(&self) -> Result<(), AnKiError> {
+        let conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AnKiError::TaskRecovery(e.to_string()))?;
         let rows = conn
             .query("SELECT task_id, task_type, data FROM tasks", &[])
-            .await?;
+            .await
+            .map_err(|e| AnKiError::TaskRecovery(e.to_string()))?;
         let mut tasks = self.tasks.write().await;
         tasks.clear();
         for row in rows {

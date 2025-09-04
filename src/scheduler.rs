@@ -10,8 +10,7 @@ use std::error::Error;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time;
-use tracing::{error, info};
-use uuid::Uuid;
+use crate::error::AnKiError;
 
 /// Specifies how the training tasks should be coordinated across nodes.
 #[derive(Clone, Copy)]
@@ -52,25 +51,20 @@ impl Scheduler {
         }
     }
 
-    /// Sends `task` to the least-loaded node.
-    ///
-    /// # Parameters
-    /// * `task` - The task to dispatch.
-    ///
-    /// # Errors
-    /// Returns an error if there are no nodes available or the channel send
-    /// operation fails.
-    pub async fn schedule_task(&self, task: Task) -> Result<(), Box<dyn Error>> {
+    pub async fn schedule_task(&self, task: Task) -> Result<(), AnKiError> {
         if let Some(node_id) = self.load_balancer.assign_task().await {
             info!("Scheduling task {} to node {}", task.task_id, node_id);
-            self.task_tx.send(task).await.map_err(|e| {
-                error!("Failed to send task: {:?}", e);
-                e
-            })?;
+            self.task_tx
+                .send(task)
+                .await
+                .map_err(|e| {
+                    error!("Failed to send task: {:?}", e);
+                    AnKiError::Scheduler(e.to_string())
+                })?;
             Ok(())
         } else {
             error!("No available nodes to schedule task {}");
-            Err("No available nodes".into())
+            Err(AnKiError::Scheduler("No available nodes".into()))
         }
     }
 
@@ -103,17 +97,20 @@ impl Scheduler {
     }
 
     /// Sends a task to every node managed by the scheduler.
-    async fn broadcast_task(&self, task: Task) -> Result<(), Box<dyn Error>> {
+    async fn broadcast_task(&self, task: Task) -> Result<(), AnKiError> {
         let nodes = self.load_balancer.nodes.read().await;
         for info in nodes.values() {
             info!(
                 "Broadcasting task {} to node {}",
                 task.task_id, info.node_id
             );
-            self.task_tx.send(task.clone()).await.map_err(|e| {
-                error!("Failed to send task: {:?}", e);
-                e
-            })?;
+            self.task_tx
+                .send(task.clone())
+                .await
+                .map_err(|e| {
+                    error!("Failed to send task: {:?}", e);
+                    AnKiError::Scheduler(e.to_string())
+                })?;
         }
         Ok(())
     }

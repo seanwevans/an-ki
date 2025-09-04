@@ -1,18 +1,18 @@
-use std::fmt;
+use thiserror::Error;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Error)]
 pub enum AnKiError {
-    InvalidCiphertext,
-    CryptoError(String),
+    #[error("Messaging error: {0}")]
+    Messaging(String),
+    #[error("Network error: {0}")]
+    Network(String),
+    #[error("Config error: {0}")]
+    Config(String),
+    #[error("Security error: {0}")]
+    Security(String),
+    #[error("Scheduler error: {0}")]
+    Scheduler(String),
+    #[error("Task recovery error: {0}")]
+    TaskRecovery(String),
 }
 
-impl fmt::Display for AnKiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AnKiError::InvalidCiphertext => write!(f, "Invalid ciphertext"),
-            AnKiError::CryptoError(msg) => write!(f, "{}", msg),
-        }
-    }
-}
-
-impl std::error::Error for AnKiError {}

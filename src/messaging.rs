@@ -1,28 +1,27 @@
 // messaging.rs: Implements RabbitMQ messaging logic, including sending and receiving messages across the network.
 
-use lapin::{
-    options::*, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties,
-};
+use lapin::{options::*, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties};
 use std::error::Error;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};
+use crate::error::AnKiError;
 
-pub async fn establish_connection(amqp_addr: &str) -> Result<Channel, Box<dyn Error>> {
+pub async fn establish_connection(amqp_addr: &str) -> Result<Channel, AnKiError> {
     let connection = Connection::connect(amqp_addr, ConnectionProperties::default())
         .await
         .map_err(|e| {
             error!("Failed to connect to RabbitMQ: {:?}", e);
-            e
+            AnKiError::Messaging(e.to_string())
         })?;
     let channel = connection.create_channel().await.map_err(|e| {
         error!("Failed to create channel: {:?}", e);
-        e
+        AnKiError::Messaging(e.to_string())
     })?;
     info!("Established connection to RabbitMQ at: {}", amqp_addr);
     Ok(channel)
 }
 
-pub async fn declare_queue(channel: &Channel, queue_name: &str) -> Result<(), Box<dyn Error>> {
+pub async fn declare_queue(channel: &Channel, queue_name: &str) -> Result<(), AnKiError> {
     channel
         .queue_declare(
             queue_name,
@@ -32,17 +31,13 @@ pub async fn declare_queue(channel: &Channel, queue_name: &str) -> Result<(), Bo
         .await
         .map_err(|e| {
             error!("Failed to declare queue: {:?}", e);
-            e
+            AnKiError::Messaging(e.to_string())
         })?;
     info!("Declared queue: {}", queue_name);
     Ok(())
 }
 
-pub async fn publish_message(
-    channel: &Channel,
-    queue_name: &str,
-    payload: &[u8],
-) -> Result<(), Box<dyn Error>> {
+pub async fn publish_message(channel: &Channel, queue_name: &str, payload: &[u8]) -> Result<(), AnKiError> {
     channel
         .basic_publish(
             "",
@@ -54,7 +49,7 @@ pub async fn publish_message(
         .await
         .map_err(|e| {
             error!("Failed to publish message: {:?}", e);
-            e
+            AnKiError::Messaging(e.to_string())
         })?;
     info!("Published message to queue: {}", queue_name);
     Ok(())
@@ -64,7 +59,7 @@ pub async fn consume_messages(
     channel: &Channel,
     queue_name: &str,
     consumer_tag: &str,
-) -> Result<lapin::Consumer, Box<dyn Error>> {
+) -> Result<lapin::Consumer, AnKiError> {
     let consumer = channel
         .basic_consume(
             queue_name,
@@ -75,7 +70,7 @@ pub async fn consume_messages(
         .await
         .map_err(|e| {
             error!("Failed to start consuming: {:?}", e);
-            e
+            AnKiError::Messaging(e.to_string())
         })?;
     info!("Started consuming messages from queue: {}", queue_name);
     Ok(consumer)
