@@ -1,4 +1,8 @@
-// network.rs: Abstracts network operations such as connecting nodes and handling retries.
+//! Networking utilities for establishing TLS connections between nodes.
+//!
+//! The [`NetworkManager`] provides retrying connection logic and tracks peers that
+//! are currently connected. It is primarily used by higher level coordination
+//! components to ensure reliable communication between nodes.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -13,13 +17,21 @@ use tokio_rustls::{
 use tracing::{error, info};
 use crate::error::AnKiError;
 
+/// Manages outbound connections to other nodes and maintains a set of peers that
+/// are currently reachable.
 #[derive(Clone, Debug)]
 pub struct NetworkManager {
+    /// Addresses of nodes that have been successfully contacted.
     pub connected_nodes: Arc<RwLock<HashSet<SocketAddr>>>,
+    /// TLS configuration used when connecting to remote nodes.
     tls_config: Arc<ClientConfig>,
 }
 
 impl NetworkManager {
+    /// Creates a new [`NetworkManager`] using the provided TLS client configuration.
+    ///
+    /// # Parameters
+    /// * `tls_config` - TLS settings used for all outbound connections.
     pub fn new(tls_config: ClientConfig) -> Self {
         NetworkManager {
             connected_nodes: Arc::new(RwLock::new(HashSet::new())),
@@ -27,6 +39,19 @@ impl NetworkManager {
         }
     }
 
+    /// Attempts to establish a TLS connection to `address`.
+    ///
+    /// # Parameters
+    /// * `address` - Socket address of the remote node.
+    /// * `domain` - DNS name expected in the remote TLS certificate.
+    /// * `retry_count` - Number of times to retry before giving up.
+    /// * `timeout_duration` - How long to wait for each connection attempt.
+    /// * `base_delay` - Initial delay before retrying.
+    /// * `max_backoff` - Maximum delay between retries.
+    ///
+    /// # Errors
+    /// Returns an error if a connection cannot be established after all retries
+    /// or if TLS negotiation fails.
     pub async fn connect_to_node(
         &self,
         address: SocketAddr,
@@ -85,6 +110,10 @@ impl NetworkManager {
         Err(AnKiError::Network("Failed to connect after retries".into()))
     }
 
+    /// Removes a node from the tracked set of connected peers.
+    ///
+    /// # Parameters
+    /// * `address` - Address of the node to disconnect.
     pub async fn disconnect_node(&self, address: &SocketAddr) {
         let mut nodes = self.connected_nodes.write().await;
         if nodes.remove(address) {
@@ -94,6 +123,7 @@ impl NetworkManager {
         }
     }
 
+    /// Returns a list of currently connected node addresses.
     pub async fn list_connected_nodes(&self) -> Vec<SocketAddr> {
         let nodes = self.connected_nodes.read().await;
         nodes.iter().cloned().collect()

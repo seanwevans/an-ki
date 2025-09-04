@@ -10,17 +10,91 @@ use crate::{
 use futures_util::stream::StreamExt;
 use lapin::{
     options::{BasicAckOptions, BasicNackOptions},
-    Channel, Consumer,
+    Channel,
 };
 use lazy_static::lazy_static;
 use tokio::sync::{oneshot, Mutex};
-use tokio::time::{sleep, Duration};
 use tracing::{error, info};
 use uuid::Uuid;
 
-lazy_static! {
-    static ref MODEL_PARAMS: Mutex<Vec<f32>> = Mutex::new(Vec::new());
-    static ref GRAD_ACCUM: Mutex<(Vec<f32>, usize)> = Mutex::new((Vec::new(), 0));
+#[derive(Default)]
+pub struct AnNodeState {
+    model_params: Vec<f32>,
+    grad_accum: (Vec<f32>, usize),
+}
+
+impl AnNodeState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn process_task(
+        &mut self,
+        task: Task,
+        channel: Option<&Channel>,
+        shard_count: usize,
+    ) -> Result<(), Box<dyn Error>> {
+        match task.task_type {
+            TaskType::GradientUpdate => {
+                let gradient: Vec<f32> = serde_json::from_str(&task.data)?;
+                let broadcast_data = {
+                    if self.grad_accum.0.is_empty() {
+                        self.grad_accum.0 = vec![0.0; gradient.len()];
+                    }
+                    for (a, g) in self.grad_accum.0.iter_mut().zip(&gradient) {
+                        *a += g;
+                    }
+                    self.grad_accum.1 += 1;
+                    if self.grad_accum.1 >= shard_count {
+                        if self.model_params.is_empty() {
+                            self.model_params
+                                .resize(self.grad_accum.0.len(), 0.0);
+                        }
+                        for (m, a) in self
+                            .model_params
+                            .iter_mut()
+                            .zip(self.grad_accum.0.iter())
+                        {
+                            *m -= *a / shard_count as f32;
+                        }
+                        let model_clone = self.model_params.clone();
+                        self.grad_accum.0.iter_mut().for_each(|v| *v = 0.0);
+                        self.grad_accum.1 = 0;
+                        Some(model_clone)
+                    } else {
+                        None
+                    }
+                };
+                if let (Some(ch), Some(model)) = (channel, broadcast_data) {
+                    self.broadcast_model(&model, ch).await?;
+                }
+            }
+            TaskType::ParameterPull => {
+                if let Some(ch) = channel {
+                    let model = self.model_params.clone();
+                    self.broadcast_model(&model, ch).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn broadcast_model(
+        &self,
+        model: &[f32],
+        channel: &Channel,
+    ) -> Result<(), Box<dyn Error>> {
+        let task = Task {
+            task_id: Uuid::new_v4(),
+            task_type: TaskType::ParameterPull,
+            data: serde_json::to_string(model)?,
+        };
+        messaging::declare_queue(channel, "ki_model_queue").await?;
+        let payload = serde_json::to_vec(&task)?;
+        messaging::publish_message(channel, "ki_model_queue", &payload).await?;
+        info!("Broadcasted model update");
+        Ok(())
+    }
 }
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
@@ -43,6 +117,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     })?;
     let amqp_addr = settings.amqp_addr.clone();
     let shard_count = settings.model_shards;
+    let mut state = AnNodeState::new();
 
     let max_retries: u32 = std::env::var("AMQP_RECONNECT_ATTEMPTS")
         .unwrap_or_else(|_| "5".into())
@@ -55,30 +130,16 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let queue_name = "an_task_queue";
     let consumer_tag = "an_consumer";
-    let mut attempts = 0u32;
 
     loop {
-        let (channel, mut consumer) =
-            match setup_consumer(&amqp_addr, queue_name, consumer_tag).await {
-                Ok(c) => {
-                    attempts = 0;
-                    c
-                }
-                Err(e) => {
-                    attempts += 1;
-                    error!(
-                        "Failed to establish connection: {:?}. Attempt {}/{}",
-                        e, attempts, max_retries
-                    );
-                    if attempts >= max_retries {
-                        error!("Exceeded maximum reconnection attempts. Exiting.");
-                        return Err(e);
-                    }
-                    let delay = backoff_ms * 2u64.pow(attempts - 1);
-                    sleep(Duration::from_millis(delay)).await;
-                    continue;
-                }
-            };
+        let (channel, mut consumer) = messaging::connect_with_retries(
+            &amqp_addr,
+            queue_name,
+            consumer_tag,
+            max_retries,
+            backoff_ms,
+        )
+        .await?;
 
         info!("An node is running and waiting for tasks...");
 
@@ -94,7 +155,10 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                             match serde_json::from_slice::<Task>(&delivery.data) {
                                 Ok(task_message) => {
                                     info!("Received task: {:?}", task_message);
-                                    if let Err(e) = process_task(task_message, Some(&channel), shard_count).await {
+                                    if let Err(e) = state
+                                        .process_task(task_message, Some(&channel), shard_count)
+                                        .await
+                                    {
                                         error!("Failed to process task: {:?}", e);
                                     }
                                     if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
@@ -121,16 +185,9 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
-
-        attempts += 1;
-        if attempts >= max_retries {
-            error!("Failed to reconnect after {} attempts", max_retries);
-            return Err("reconnection attempts exceeded".into());
-        }
-        let delay = backoff_ms * 2u64.pow(attempts - 1);
-        sleep(Duration::from_millis(delay)).await;
     }
 }
+
 
 async fn setup_consumer(
     amqp_addr: &str,
@@ -211,12 +268,14 @@ async fn broadcast_model(model: &[f32], channel: &Channel) -> Result<(), Box<dyn
         .map_err(|e| Box::<dyn Error>::from(e))?;
     info!("Broadcasted model update");
     Ok(())
+
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::{Task, TaskType};
+    #[cfg(feature = "integration-tests")]
     use tokio::time::{timeout, Duration};
 
     #[tokio::test]
@@ -226,13 +285,8 @@ mod tests {
             task_type: TaskType::GradientUpdate,
             data: serde_json::to_string(&vec![0.1_f32, 0.2_f32]).unwrap(),
         };
-        assert!(process_task(task, None, 1).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_setup_consumer_failure() {
-        let result = setup_consumer("amqp://invalid:5672/%2f", "test_queue", "test_tag").await;
-        assert!(result.is_err());
+        let mut state = AnNodeState::new();
+        assert!(state.process_task(task, None, 1).await.is_ok());
     }
 
     #[cfg(feature = "integration-tests")]
@@ -247,9 +301,10 @@ mod tests {
     #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_setup_consumer_workflow() {
-        let (channel, mut consumer) = setup_consumer(AMQP_ADDR, "test_queue", "test_consumer")
-            .await
-            .expect("setup");
+        let (channel, mut consumer) =
+            messaging::connect_with_retries(AMQP_ADDR, "test_queue", "test_consumer", 1, 10)
+                .await
+                .expect("setup");
 
         messaging::publish_message(&channel, "test_queue", b"hello")
             .await

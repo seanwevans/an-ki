@@ -1,6 +1,7 @@
 // logging_metrics.rs: Implements logging and metrics collection for monitoring node health and performance.
 
 use lazy_static::lazy_static;
+use once_cell::sync::OnceCell;
 use opentelemetry::{global, trace::TracerProvider as _};
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 use opentelemetry_sdk::trace::{BatchSpanProcessor, SdkTracerProvider};
@@ -38,37 +39,41 @@ lazy_static! {
     .unwrap();
 }
 
+static INIT: OnceCell<()> = OnceCell::new();
+
 pub fn init_logging() {
-    let endpoint = crate::config::load_settings()
-        .ok()
-        .and_then(|s| s.otlp_endpoint)
-        .or_else(|| env::var("OTLP_ENDPOINT").ok())
-        .unwrap_or_else(|| "http://localhost:4317".to_string());
+    INIT.get_or_init(|| {
+        let endpoint = crate::config::load_settings()
+            .ok()
+            .and_then(|s| s.otlp_endpoint)
+            .or_else(|| env::var("OTLP_ENDPOINT").ok())
+            .unwrap_or_else(|| "http://localhost:4317".to_string());
 
-    let exporter = SpanExporter::builder()
-        .with_tonic()
-        .with_endpoint(endpoint)
-        .build()
-        .expect("failed to create OTLP exporter");
+        let exporter = SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint)
+            .build()
+            .expect("failed to create OTLP exporter");
 
-    let processor = BatchSpanProcessor::builder(exporter).build();
-    let provider = SdkTracerProvider::builder()
-        .with_span_processor(processor)
-        .build();
+        let processor = BatchSpanProcessor::builder(exporter).build();
+        let provider = SdkTracerProvider::builder()
+            .with_span_processor(processor)
+            .build();
 
-    let tracer = provider.tracer("an-ki");
-    let otel_layer = OpenTelemetryLayer::new(tracer);
+        let tracer = provider.tracer("an-ki");
+        let otel_layer = OpenTelemetryLayer::new(tracer);
 
-    global::set_tracer_provider(provider);
+        global::set_tracer_provider(provider);
 
-    Registry::default()
-        .with(fmt::layer().with_target(false))
-        .with(EnvFilter::from_default_env())
-        .with(otel_layer)
-        .init();
+        Registry::default()
+            .with(fmt::layer().with_target(false))
+            .with(EnvFilter::from_default_env())
+            .with(otel_layer)
+            .init();
 
-    set_node_status(1.0);
-    info!("Logging initialized.");
+        set_node_status(1.0);
+        info!("Logging initialized.");
+    });
 }
 
 pub fn set_node_status(status: f64) {
@@ -106,16 +111,21 @@ pub async fn run_metrics_server() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use once_cell::sync::Lazy;
     use std::time::Duration;
-
-    #[test]
-    fn test_logging_initialization() {
+    static INIT: Lazy<()> = Lazy::new(|| {
         init_logging();
+    });
+
+    #[tokio::test]
+    async fn test_logging_initialization() {
+        Lazy::force(&INIT);
         info!("Testing logging initialization");
     }
 
     #[tokio::test]
     async fn test_metrics_endpoint() {
+        Lazy::force(&INIT);
         use warp::Reply;
         let response = metrics_endpoint().await.unwrap();
         assert!(response.into_response().status().is_success());
@@ -123,8 +133,7 @@ mod tests {
 
     #[test]
     fn test_log_task_processing() {
-        let start_time = Instant::now();
-        std::thread::sleep(Duration::from_millis(100));
+        let start_time = Instant::now() - Duration::from_millis(50);
         log_task_processing(start_time);
     }
 }

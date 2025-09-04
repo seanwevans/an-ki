@@ -1,13 +1,13 @@
 // principal.rs: Implements the specific responsibilities of the Principal, including role management and global coordination.
 
-use crate::messaging::{consume_messages, declare_queue, publish_message};
+use crate::messaging::{consume_messages, declare_queue};
 use crate::signals;
 
 use crate::config::load_settings;
 use futures_util::stream::StreamExt;
 use lapin::{options::BasicAckOptions, Channel, Connection, ConnectionProperties};
-use std::error::Error;
 use serde::{Deserialize, Serialize};
+use std::error::Error;
 use tokio::sync::oneshot;
 use tracing::{error, info};
 
@@ -18,12 +18,17 @@ struct RoleAssignment {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct UpdateRequest {
-    update_id: String,
-    content: String,
+#[serde(tag = "type", rename_all = "snake_case", content = "data")]
+enum UpdateContent {
+    Database { statement: String },
+    ConfigReload { key: String, value: String },
 }
 
-
+#[derive(Serialize, Deserialize, Debug)]
+struct UpdateRequest {
+    update_id: String,
+    content: UpdateContent,
+}
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
     #[cfg(unix)]
@@ -120,9 +125,39 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 }
 
 async fn process_update_request(update: UpdateRequest) -> Result<(), Box<dyn Error>> {
-    // Placeholder for update request approval logic
-    // Validate the update and apply it to the master database if approved
-    info!("Processing update request with ID: {}", update.update_id);    
+    info!("Processing update request with ID: {}", update.update_id);
+
+    match update.content {
+        UpdateContent::Database { statement } => {
+            if statement.trim().is_empty() {
+                error!("Database update validation failed: empty statement");
+                return Err("Invalid database statement".into());
+            }
+            apply_database_update(&statement)?;
+            info!("Database update applied successfully");
+        }
+        UpdateContent::ConfigReload { key, value } => {
+            if key.trim().is_empty() {
+                error!("Config reload validation failed: empty key");
+                return Err("Invalid config key".into());
+            }
+            broadcast_config_reload(&key, &value)?;
+            info!("Configuration reload broadcast successfully");
+        }
+    }
+
+    Ok(())
+}
+
+fn apply_database_update(statement: &str) -> Result<(), Box<dyn Error>> {
+    info!("Applying database statement: {}", statement);
+    // Placeholder for actual database interaction
+    Ok(())
+}
+
+fn broadcast_config_reload(key: &str, value: &str) -> Result<(), Box<dyn Error>> {
+    info!("Broadcasting config reload for {}={} ", key, value);
+    // Placeholder for broadcasting configuration changes to nodes
     Ok(())
 }
 
@@ -134,4 +169,59 @@ pub async fn assign_role(
 ) -> Result<(), Box<dyn Error>> {
     info!("Assigned role '{}' to node '{}'", role, node_id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn process_update_request_database_success() {
+        let update = UpdateRequest {
+            update_id: "1".into(),
+            content: UpdateContent::Database {
+                statement: "UPDATE table SET value = 1".into(),
+            },
+        };
+
+        assert!(process_update_request(update).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn process_update_request_database_failure() {
+        let update = UpdateRequest {
+            update_id: "2".into(),
+            content: UpdateContent::Database {
+                statement: "   ".into(),
+            },
+        };
+
+        assert!(process_update_request(update).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn process_update_request_config_success() {
+        let update = UpdateRequest {
+            update_id: "3".into(),
+            content: UpdateContent::ConfigReload {
+                key: "threshold".into(),
+                value: "10".into(),
+            },
+        };
+
+        assert!(process_update_request(update).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn process_update_request_config_failure() {
+        let update = UpdateRequest {
+            update_id: "4".into(),
+            content: UpdateContent::ConfigReload {
+                key: "".into(),
+                value: "10".into(),
+            },
+        };
+
+        assert!(process_update_request(update).await.is_err());
+    }
 }

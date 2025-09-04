@@ -1105,6 +1105,7 @@ dependencies = [
  "lapin",
  "lazy_static",
  "nix",
+ "once_cell",
  "openraft",
  "openraft-memstore",
  "opentelemetry",

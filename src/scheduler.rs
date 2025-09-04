@@ -1,11 +1,14 @@
-// scheduler.rs: Implements a task scheduler that assigns tasks to Ki nodes based on load and capacity.
+//! Task scheduling for distributing work among Ki nodes.
+//!
+//! The [`Scheduler`] coordinates training tasks by leveraging the [`LoadBalancer`]
+//! and dispatching work to available nodes according to the selected
+//! [`TrainingMode`].
 
-use crate::load_balancer::LoadBalancer;
 use crate::common::{Task, TaskType};
-use tokio::sync::mpsc;
-use uuid::Uuid;
-use tracing::{info, error};
+use crate::load_balancer::LoadBalancer;
+use std::error::Error;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::time;
 use crate::error::AnKiError;
 
@@ -18,6 +21,7 @@ pub enum TrainingMode {
     AllReduce,
 }
 
+/// Coordinates the distribution of [`Task`]s to worker nodes.
 pub struct Scheduler {
     load_balancer: LoadBalancer,
     task_tx: mpsc::Sender<Task>,
@@ -26,7 +30,19 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn new(load_balancer: LoadBalancer, task_tx: mpsc::Sender<Task>, mode: TrainingMode, epochs: u32) -> Self {
+    /// Creates a new scheduler.
+    ///
+    /// # Parameters
+    /// * `load_balancer` - Component used to select target nodes.
+    /// * `task_tx` - Channel used to dispatch tasks.
+    /// * `mode` - Training coordination strategy.
+    /// * `epochs` - Number of iterations to run in [`run_scheduler`].
+    pub fn new(
+        load_balancer: LoadBalancer,
+        task_tx: mpsc::Sender<Task>,
+        mode: TrainingMode,
+        epochs: u32,
+    ) -> Self {
         Scheduler {
             load_balancer,
             task_tx,
@@ -52,10 +68,15 @@ impl Scheduler {
         }
     }
 
-    /// Runs the scheduler for a fixed number of epochs. In `ParameterServer` mode
-    /// a `ParameterPull` task is broadcast to all Ki nodes so they can fetch the
-    /// latest model from the An node. In `AllReduce` mode a `GradientUpdate` task is
-    /// broadcast which instructs nodes to compute gradients on their shard.
+    /// Runs the scheduler for a fixed number of `epochs`.
+    ///
+    /// In [`TrainingMode::ParameterServer`] a `ParameterPull` task is broadcast to
+    /// all nodes so they can fetch the latest model. In
+    /// [`TrainingMode::AllReduce`] a `GradientUpdate` task instructs nodes to
+    /// compute gradients on their shard.
+    ///
+    /// # Parameters
+    /// * `interval` - Delay between task broadcasts.
     pub async fn run_scheduler(&self, interval: Duration) {
         let mut ticker = time::interval(interval);
         for _ in 0..self.epochs {
@@ -81,8 +102,7 @@ impl Scheduler {
         for info in nodes.values() {
             info!(
                 "Broadcasting task {} to node {}",
-                task.task_id,
-                info.node_id
+                task.task_id, info.node_id
             );
             self.task_tx
                 .send(task.clone())
@@ -106,7 +126,12 @@ mod tests {
     async fn test_schedule_task() {
         let load_balancer = LoadBalancer::new();
         let (task_tx, mut task_rx) = mpsc::channel(10);
-        let scheduler = Scheduler::new(load_balancer.clone(), task_tx, TrainingMode::ParameterServer, 1);
+        let scheduler = Scheduler::new(
+            load_balancer.clone(),
+            task_tx,
+            TrainingMode::ParameterServer,
+            1,
+        );
 
         load_balancer.add_node(Uuid::new_v4()).await;
         let task = Task {

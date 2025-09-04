@@ -15,11 +15,13 @@ use std::num::NonZeroU32;
 use std::time::{SystemTime, UNIX_EPOCH};
 use webpki::{EndEntityCert, Time, TrustAnchor, ECDSA_P256_SHA256};
 
+use once_cell::sync::OnceCell;
 use std::env;
 use tracing::info;
 use crate::error::AnKiError;
 
 use crate::common::NodeRole;
+use crate::error::AnKiError;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -62,7 +64,7 @@ pub fn verify_token(token: &str) -> Result<TokenData<Claims>, AnKiError> {
     let secret_key = get_secret_key()?;
     let token_data = decode::<Claims>(
         token,
-        &DecodingKey::from_secret(secret_key.as_ref()),
+        &DecodingKey::from_secret(secret_key.as_bytes()),
         &Validation::default(),
     )
     .map_err(|e| AnKiError::Security(e.to_string()))?;
@@ -209,8 +211,11 @@ mod tests {
     use super::{
         decrypt_message, encrypt_message, generate_challenge, generate_token, renew_token,
         sign_challenge, validate_certificate, verify_challenge, verify_token, Claims,
+        NONCE_LEN, SALT_LEN,
     };
     use crate::common::NodeRole;
+    use crate::error::AnKiError;
+    use base64::{engine::general_purpose, Engine as _};
     use rcgen::{
         BasicConstraints, Certificate as RcCertificate, CertificateParams, ExtendedKeyUsagePurpose,
         IsCa,
@@ -231,6 +236,7 @@ mod tests {
 
         assert_eq!(sub, node_id);
         assert_eq!(claim_role, role);
+        std::env::remove_var("JWT_SECRET_KEY");
     }
 
     #[test]
@@ -251,6 +257,17 @@ mod tests {
 
         // Decryption should fail with an incorrect key
         assert!(decrypt_message(&encrypted_message1, "wrong_key").is_err());
+
+        // Truncated ciphertext should return InvalidCiphertext
+        let mut truncated = general_purpose::STANDARD
+            .decode(&encrypted_message1)
+            .unwrap();
+        truncated.truncate(SALT_LEN + NONCE_LEN - 1);
+        let truncated = general_purpose::STANDARD.encode(&truncated);
+        assert!(matches!(
+            decrypt_message(&truncated, key),
+            Err(AnKiError::InvalidCiphertext)
+        ));
     }
 
     #[test]
@@ -260,6 +277,7 @@ mod tests {
         let renewed = renew_token(&token, 60).unwrap();
         let data = verify_token(&renewed).unwrap();
         assert_eq!(data.claims.sub, "node");
+        std::env::remove_var("JWT_SECRET_KEY");
     }
 
     #[test]
