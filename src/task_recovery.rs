@@ -128,7 +128,8 @@ mod tests {
     use bb8::Pool;
     use bb8_postgres::PostgresConnectionManager;
     use std::str::FromStr;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{timeout, Duration};
+    use tokio::task::yield_now;
     use tokio_postgres::{Config, NoTls};
 
     #[tokio::test]
@@ -279,14 +280,24 @@ mod tests {
             manager_clone.add_task(task_clone).await.unwrap();
         });
 
-        // Give add_task a moment to insert the task and reach the awaiting connection.
-        sleep(Duration::from_millis(100)).await;
+        // Wait for the task to be inserted before proceeding.
+        let task_id = task.task_id;
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if recovery_manager.tasks.read().await.contains_key(&task_id) {
+                    break;
+                }
+                yield_now().await;
+            }
+        })
+        .await
+        .expect("task inserted");
 
         // We should be able to read the task while the DB operation is waiting, proving
         // the write lock was released.
         {
             let tasks = recovery_manager.tasks.read().await;
-            assert!(tasks.contains_key(&task.task_id));
+            assert!(tasks.contains_key(&task_id));
         }
 
         // Release the connection so add_task can complete.
