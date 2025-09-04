@@ -10,11 +10,10 @@ use crate::{
 use futures_util::stream::StreamExt;
 use lapin::{
     options::{BasicAckOptions, BasicNackOptions},
-    Channel, Consumer,
+    Channel,
 };
 use lazy_static::lazy_static;
 use tokio::sync::{oneshot, Mutex};
-use tokio::time::{sleep, Duration};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -55,30 +54,16 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let queue_name = "an_task_queue";
     let consumer_tag = "an_consumer";
-    let mut attempts = 0u32;
 
     loop {
-        let (channel, mut consumer) =
-            match setup_consumer(&amqp_addr, queue_name, consumer_tag).await {
-                Ok(c) => {
-                    attempts = 0;
-                    c
-                }
-                Err(e) => {
-                    attempts += 1;
-                    error!(
-                        "Failed to establish connection: {:?}. Attempt {}/{}",
-                        e, attempts, max_retries
-                    );
-                    if attempts >= max_retries {
-                        error!("Exceeded maximum reconnection attempts. Exiting.");
-                        return Err(e);
-                    }
-                    let delay = backoff_ms * 2u64.pow(attempts - 1);
-                    sleep(Duration::from_millis(delay)).await;
-                    continue;
-                }
-            };
+        let (channel, mut consumer) = messaging::connect_with_retries(
+            &amqp_addr,
+            queue_name,
+            consumer_tag,
+            max_retries,
+            backoff_ms,
+        )
+        .await?;
 
         info!("An node is running and waiting for tasks...");
 
@@ -121,26 +106,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
-
-        attempts += 1;
-        if attempts >= max_retries {
-            error!("Failed to reconnect after {} attempts", max_retries);
-            return Err("reconnection attempts exceeded".into());
-        }
-        let delay = backoff_ms * 2u64.pow(attempts - 1);
-        sleep(Duration::from_millis(delay)).await;
     }
-}
-
-async fn setup_consumer(
-    amqp_addr: &str,
-    queue_name: &str,
-    consumer_tag: &str,
-) -> Result<(Channel, Consumer), Box<dyn Error>> {
-    let channel = messaging::establish_connection(amqp_addr).await?;
-    messaging::declare_queue(&channel, queue_name).await?;
-    let consumer = messaging::consume_messages(&channel, queue_name, consumer_tag).await?;
-    Ok((channel, consumer))
 }
 
 async fn process_task(
@@ -207,6 +173,7 @@ async fn broadcast_model(model: &[f32], channel: &Channel) -> Result<(), Box<dyn
 mod tests {
     use super::*;
     use crate::common::{Task, TaskType};
+    #[cfg(feature = "integration-tests")]
     use tokio::time::{timeout, Duration};
 
     #[tokio::test]
@@ -217,12 +184,6 @@ mod tests {
             data: serde_json::to_string(&vec![0.1_f32, 0.2_f32]).unwrap(),
         };
         assert!(process_task(task, None, 1).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_setup_consumer_failure() {
-        let result = setup_consumer("amqp://invalid:5672/%2f", "test_queue", "test_tag").await;
-        assert!(result.is_err());
     }
 
     #[cfg(feature = "integration-tests")]
@@ -237,9 +198,10 @@ mod tests {
     #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_setup_consumer_workflow() {
-        let (channel, mut consumer) = setup_consumer(AMQP_ADDR, "test_queue", "test_consumer")
-            .await
-            .expect("setup");
+        let (channel, mut consumer) =
+            messaging::connect_with_retries(AMQP_ADDR, "test_queue", "test_consumer", 1, 10)
+                .await
+                .expect("setup");
 
         messaging::publish_message(&channel, "test_queue", b"hello")
             .await
