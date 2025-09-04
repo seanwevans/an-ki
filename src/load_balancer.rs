@@ -6,7 +6,7 @@ use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -81,7 +81,15 @@ impl LoadBalancer {
     }
 
     pub async fn assign_task(&self) -> Option<Uuid> {
+        let max_iterations = self.nodes.read().await.len().max(1);
+        let mut attempts = 0;
         loop {
+            if attempts >= max_iterations {
+                warn!("assign_task iteration limit reached: {}", max_iterations);
+                return None;
+            }
+            attempts += 1;
+
             let candidate = {
                 let mut heap = self.heap.write().await;
                 heap.pop()
@@ -107,6 +115,8 @@ impl LoadBalancer {
                         let mut heap = self.heap.write().await;
                         heap.push(updated);
                     }
+                } else {
+                    warn!("Stale heap entry for node: {}", node_info.node_id);
                 }
                 // Node might have been removed; continue loop
             } else {
@@ -341,6 +351,26 @@ mod tests {
         let heap = lb.heap.read().await;
         assert!(heap.iter().all(|n| n.node_id != node1));
         assert_eq!(heap.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_assign_task_handles_stale_heap_entry() {
+        let lb = LoadBalancer::new();
+        let node = Uuid::new_v4();
+
+        lb.add_node(node).await;
+
+        // Remove node from nodes map but leave its entry in the heap
+        {
+            let mut nodes = lb.nodes.write().await;
+            nodes.remove(&node);
+        }
+
+        let assigned = lb.assign_task().await;
+        assert!(assigned.is_none());
+
+        let heap = lb.heap.read().await;
+        assert!(heap.is_empty());
     }
 
     #[tokio::test]
