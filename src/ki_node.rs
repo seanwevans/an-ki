@@ -6,10 +6,9 @@ use crate::config::load_settings;
 use crate::messaging;
 use crate::signals;
 use futures_util::stream::StreamExt;
-use lapin::{options::BasicAckOptions, Channel, Consumer};
+use lapin::{options::BasicAckOptions, Channel};
 use std::error::Error;
 use tokio::sync::oneshot;
-use tokio::time::{sleep, Duration};
 use tracing::{error, info};
 
 #[cfg(feature = "tch")]
@@ -46,31 +45,16 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let queue_name = "ki_task_queue";
     let consumer_tag = "ki_consumer";
-    let mut attempts = 0u32;
 
     loop {
-        // Establish connection and consumer using messaging helpers
-        let (channel, mut consumer) =
-            match setup_consumer(&amqp_addr, queue_name, consumer_tag).await {
-                Ok(c) => {
-                    attempts = 0; // reset attempts on success
-                    c
-                }
-                Err(e) => {
-                    attempts += 1;
-                    error!(
-                        "Failed to establish connection: {:?}. Attempt {}/{}",
-                        e, attempts, max_retries
-                    );
-                    if attempts >= max_retries {
-                        error!("Exceeded maximum reconnection attempts. Exiting.");
-                        return Err(e);
-                    }
-                    let delay = backoff_ms * 2u64.pow(attempts - 1);
-                    sleep(Duration::from_millis(delay)).await;
-                    continue;
-                }
-            };
+        let (channel, mut consumer) = messaging::connect_with_retries(
+            &amqp_addr,
+            queue_name,
+            consumer_tag,
+            max_retries,
+            backoff_ms,
+        )
+        .await?;
 
         info!("Ki node is running and waiting for tasks...");
 
@@ -107,37 +91,17 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                         }
                         Some(Err(e)) => {
                             error!("Error in consumer stream: {:?}", e);
-                            break; // reconnect
+                            break;
                         }
                         None => {
                             error!("Consumer stream closed");
-                            break; // reconnect
+                            break;
                         }
                     }
                 }
             }
         }
-
-        // Consumer ended; attempt to reconnect
-        attempts += 1;
-        if attempts > max_retries {
-            error!("Failed to reconnect after {} attempts", max_retries);
-            return Err("reconnection attempts exceeded".into());
-        }
-        let delay = backoff_ms * 2u64.pow(attempts - 1);
-        sleep(Duration::from_millis(delay)).await;
     }
-}
-
-async fn setup_consumer(
-    amqp_addr: &str,
-    queue_name: &str,
-    consumer_tag: &str,
-) -> Result<(Channel, Consumer), Box<dyn Error>> {
-    let channel = messaging::establish_connection(amqp_addr).await?;
-    messaging::declare_queue(&channel, queue_name).await?;
-    let consumer = messaging::consume_messages(&channel, queue_name, consumer_tag).await?;
-    Ok((channel, consumer))
 }
 
 async fn perform_computation(task: Task) -> Result<Task, Box<dyn Error>> {
@@ -193,12 +157,6 @@ async fn send_result(result: Task, channel: &Channel) -> Result<(), Box<dyn Erro
 mod tests {
     use super::*;
     use crate::common::{Task, TaskType};
-
-    #[tokio::test]
-    async fn test_setup_consumer_failure() {
-        let result = setup_consumer("amqp://invalid:5672/%2f", "queue", "tag").await;
-        assert!(result.is_err());
-    }
 
     #[tokio::test]
     async fn test_perform_computation_parameter_pull() {

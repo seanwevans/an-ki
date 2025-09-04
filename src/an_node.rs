@@ -10,10 +10,10 @@ use crate::{
 use futures_util::stream::StreamExt;
 use lapin::{
     options::{BasicAckOptions, BasicNackOptions},
-    Channel, Consumer,
+    Channel,
 };
-use tokio::sync::oneshot;
-use tokio::time::{sleep, Duration};
+use lazy_static::lazy_static;
+use tokio::sync::{oneshot, Mutex};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -130,30 +130,16 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let queue_name = "an_task_queue";
     let consumer_tag = "an_consumer";
-    let mut attempts = 0u32;
 
     loop {
-        let (channel, mut consumer) =
-            match setup_consumer(&amqp_addr, queue_name, consumer_tag).await {
-                Ok(c) => {
-                    attempts = 0;
-                    c
-                }
-                Err(e) => {
-                    attempts += 1;
-                    error!(
-                        "Failed to establish connection: {:?}. Attempt {}/{}",
-                        e, attempts, max_retries
-                    );
-                    if attempts >= max_retries {
-                        error!("Exceeded maximum reconnection attempts. Exiting.");
-                        return Err(e);
-                    }
-                    let delay = backoff_ms * 2u64.pow(attempts - 1);
-                    sleep(Duration::from_millis(delay)).await;
-                    continue;
-                }
-            };
+        let (channel, mut consumer) = messaging::connect_with_retries(
+            &amqp_addr,
+            queue_name,
+            consumer_tag,
+            max_retries,
+            backoff_ms,
+        )
+        .await?;
 
         info!("An node is running and waiting for tasks...");
 
@@ -199,26 +185,69 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
-
-        attempts += 1;
-        if attempts >= max_retries {
-            error!("Failed to reconnect after {} attempts", max_retries);
-            return Err("reconnection attempts exceeded".into());
-        }
-        let delay = backoff_ms * 2u64.pow(attempts - 1);
-        sleep(Duration::from_millis(delay)).await;
     }
 }
 
-async fn setup_consumer(
-    amqp_addr: &str,
-    queue_name: &str,
-    consumer_tag: &str,
-) -> Result<(Channel, Consumer), Box<dyn Error>> {
-    let channel = messaging::establish_connection(amqp_addr).await?;
-    messaging::declare_queue(&channel, queue_name).await?;
-    let consumer = messaging::consume_messages(&channel, queue_name, consumer_tag).await?;
-    Ok((channel, consumer))
+
+async fn process_task(
+    task: Task,
+    channel: Option<&Channel>,
+    shard_count: usize,
+) -> Result<(), Box<dyn Error>> {
+    match task.task_type {
+        TaskType::GradientUpdate => {
+            let gradient: Vec<f32> = serde_json::from_str(&task.data)?;
+            let broadcast_data = {
+                let mut acc = GRAD_ACCUM.lock().await;
+                if acc.0.is_empty() {
+                    acc.0 = vec![0.0; gradient.len()];
+                }
+                for (a, g) in acc.0.iter_mut().zip(&gradient) {
+                    *a += g;
+                }
+                acc.1 += 1;
+                if acc.1 >= shard_count {
+                    let mut model = MODEL_PARAMS.lock().await;
+                    if model.is_empty() {
+                        model.resize(acc.0.len(), 0.0);
+                    }
+                    for (m, a) in model.iter_mut().zip(acc.0.iter()) {
+                        *m -= *a / shard_count as f32;
+                    }
+                    let model_clone = model.clone();
+                    acc.0.iter_mut().for_each(|v| *v = 0.0);
+                    acc.1 = 0;
+                    Some(model_clone)
+                } else {
+                    None
+                }
+            };
+            if let (Some(ch), Some(model)) = (channel, broadcast_data) {
+                broadcast_model(&model, ch).await?;
+            }
+        }
+        TaskType::ParameterPull => {
+            if let Some(ch) = channel {
+                let model = MODEL_PARAMS.lock().await.clone();
+                broadcast_model(&model, ch).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn broadcast_model(model: &[f32], channel: &Channel) -> Result<(), Box<dyn Error>> {
+    let task = Task {
+        task_id: Uuid::new_v4(),
+        task_type: TaskType::ParameterPull,
+        data: serde_json::to_string(model)?,
+    };
+    messaging::declare_queue(channel, "ki_model_queue").await?;
+    let payload = serde_json::to_vec(&task)?;
+    messaging::publish_message(channel, "ki_model_queue", &payload).await?;
+    info!("Broadcasted model update");
+    Ok(())
+
 }
 
 #[cfg(test)]
@@ -239,12 +268,6 @@ mod tests {
         assert!(state.process_task(task, None, 1).await.is_ok());
     }
 
-    #[tokio::test]
-    async fn test_setup_consumer_failure() {
-        let result = setup_consumer("amqp://invalid:5672/%2f", "test_queue", "test_tag").await;
-        assert!(result.is_err());
-    }
-
     #[cfg(feature = "integration-tests")]
     use crate::messaging;
     #[cfg(feature = "integration-tests")]
@@ -257,9 +280,10 @@ mod tests {
     #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_setup_consumer_workflow() {
-        let (channel, mut consumer) = setup_consumer(AMQP_ADDR, "test_queue", "test_consumer")
-            .await
-            .expect("setup");
+        let (channel, mut consumer) =
+            messaging::connect_with_retries(AMQP_ADDR, "test_queue", "test_consumer", 1, 10)
+                .await
+                .expect("setup");
 
         messaging::publish_message(&channel, "test_queue", b"hello")
             .await
