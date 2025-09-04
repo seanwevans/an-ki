@@ -1,4 +1,8 @@
-// load_balancer.rs: Implements load balancing for An nodes to effectively distribute tasks.
+//! Load balancing for assigning work to nodes.
+//!
+//! The [`LoadBalancer`] maintains a set of active nodes and distributes work to the
+//! least loaded node. It uses a binary heap to efficiently choose candidates and
+//! exposes helpers for updating load information.
 
 use rand::seq::IteratorRandom;
 use std::cmp::Ordering;
@@ -9,9 +13,12 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 use uuid::Uuid;
 
+/// Stores the current task load for a node.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NodeLoadInfo {
+    /// Unique identifier of the node.
     pub node_id: Uuid,
+    /// Number of tasks currently assigned to the node.
     pub task_count: usize,
 }
 
@@ -31,9 +38,12 @@ impl PartialOrd for NodeLoadInfo {
     }
 }
 
+/// Coordinates task distribution among nodes.
 #[derive(Clone)]
 pub struct LoadBalancer {
+    /// Mapping of node identifiers to their load information.
     pub nodes: Arc<RwLock<HashMap<Uuid, NodeLoadInfo>>>,
+    /// Min-heap of nodes ordered by [`NodeLoadInfo::task_count`].
     pub heap: Arc<RwLock<BinaryHeap<NodeLoadInfo>>>,
 }
 
@@ -44,6 +54,7 @@ impl Default for LoadBalancer {
 }
 
 impl LoadBalancer {
+    /// Creates an empty [`LoadBalancer`].
     pub fn new() -> Self {
         LoadBalancer {
             nodes: Arc::new(RwLock::new(HashMap::new())),
@@ -51,6 +62,10 @@ impl LoadBalancer {
         }
     }
 
+    /// Registers a new node with zero initial load.
+    ///
+    /// # Parameters
+    /// * `node_id` - Identifier of the node to add.
     pub async fn add_node(&self, node_id: Uuid) {
         let mut nodes = self.nodes.write().await;
         let info = NodeLoadInfo {
@@ -64,6 +79,10 @@ impl LoadBalancer {
         info!("Added node to load balancer: {}", node_id);
     }
 
+    /// Removes a node from the balancer.
+    ///
+    /// # Parameters
+    /// * `node_id` - Identifier of the node to remove.
     pub async fn remove_node(&self, node_id: &Uuid) {
         let mut nodes = self.nodes.write().await;
         if nodes.remove(node_id).is_some() {
@@ -80,6 +99,11 @@ impl LoadBalancer {
         }
     }
 
+    /// Assigns a task to the least-loaded node.
+    ///
+    /// # Returns
+    /// * `Some(Uuid)` - Identifier of the chosen node.
+    /// * `None` - No nodes were available for assignment.
     pub async fn assign_task(&self) -> Option<Uuid> {
         loop {
             let candidate = {
@@ -116,6 +140,10 @@ impl LoadBalancer {
         }
     }
 
+    /// Decrements the load count for a node after task completion.
+    ///
+    /// # Parameters
+    /// * `node_id` - Identifier of the node whose load should decrease.
     pub async fn complete_task(&self, node_id: &Uuid) {
         let mut nodes = self.nodes.write().await;
         if let Some(entry) = nodes.get_mut(node_id) {
@@ -145,12 +173,21 @@ impl LoadBalancer {
         }
     }
 
+    /// Returns a random node identifier or `None` if the balancer is empty.
     pub async fn random_node(&self) -> Option<Uuid> {
         let nodes = self.nodes.read().await;
         nodes.keys().copied().choose(&mut rand::thread_rng())
     }
 }
 
+/// Updates the load balancer using load reports from nodes.
+///
+/// The function listens on `rx` for [`NodeLoadInfo`] messages and updates the
+/// balancer to reflect the reported task counts.
+///
+/// # Parameters
+/// * `rx` - Channel receiving load updates from nodes.
+/// * `load_balancer` - Shared load balancer to update.
 pub async fn monitor_node_load(
     mut rx: broadcast::Receiver<NodeLoadInfo>,
     load_balancer: LoadBalancer,
