@@ -20,6 +20,7 @@ use std::error::Error;
 use tracing::info;
 
 use crate::common::NodeRole;
+use crate::error::AnKiError;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -117,11 +118,13 @@ pub fn encrypt_message(message: &str, key: &str) -> Result<String, Box<dyn Error
     Ok(general_purpose::STANDARD.encode(&combined))
 }
 
-pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, Box<dyn Error>> {
-    let decoded_bytes = general_purpose::STANDARD.decode(encoded_message)?;
+pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, AnKiError> {
+    let decoded_bytes = general_purpose::STANDARD
+        .decode(encoded_message)
+        .map_err(|e| AnKiError::CryptoError(e.to_string()))?;
 
     if decoded_bytes.len() < SALT_LEN + NONCE_LEN {
-        return Err("Invalid encrypted message".into());
+        return Err(AnKiError::InvalidCiphertext);
     }
 
     // Split salt, nonce, and ciphertext
@@ -143,8 +146,9 @@ pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, Box<d
     let nonce = Nonce::from_slice(nonce_bytes);
     let plaintext = cipher
         .decrypt(nonce, ciphertext)
-        .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
-    let decrypted_message = String::from_utf8(plaintext)?;
+        .map_err(|e| AnKiError::CryptoError(e.to_string()))?;
+    let decrypted_message = String::from_utf8(plaintext)
+        .map_err(|e| AnKiError::CryptoError(e.to_string()))?;
     Ok(decrypted_message)
 }
 
@@ -198,8 +202,11 @@ mod tests {
     use super::{
         decrypt_message, encrypt_message, generate_challenge, generate_token, renew_token,
         sign_challenge, validate_certificate, verify_challenge, verify_token, Claims,
+        NONCE_LEN, SALT_LEN,
     };
     use crate::common::NodeRole;
+    use crate::error::AnKiError;
+    use base64::{engine::general_purpose, Engine as _};
     use rcgen::{
         BasicConstraints, Certificate as RcCertificate, CertificateParams, ExtendedKeyUsagePurpose,
         IsCa,
@@ -240,6 +247,17 @@ mod tests {
 
         // Decryption should fail with an incorrect key
         assert!(decrypt_message(&encrypted_message1, "wrong_key").is_err());
+
+        // Truncated ciphertext should return InvalidCiphertext
+        let mut truncated = general_purpose::STANDARD
+            .decode(&encrypted_message1)
+            .unwrap();
+        truncated.truncate(SALT_LEN + NONCE_LEN - 1);
+        let truncated = general_purpose::STANDARD.encode(&truncated);
+        assert!(matches!(
+            decrypt_message(&truncated, key),
+            Err(AnKiError::InvalidCiphertext)
+        ));
     }
 
     #[test]
