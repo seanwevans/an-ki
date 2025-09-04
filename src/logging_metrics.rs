@@ -123,8 +123,8 @@ mod tests {
 
     #[test]
     fn test_log_task_processing() {
-        let start_time = Instant::now();
-        std::thread::sleep(Duration::from_millis(100));
+        // Use a fake elapsed time to avoid slowing down the test.
+        let start_time = Instant::now() - Duration::from_millis(50);
         log_task_processing(start_time);
     }
 }

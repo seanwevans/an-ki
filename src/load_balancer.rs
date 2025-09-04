@@ -185,7 +185,8 @@ pub async fn monitor_node_load(
 mod tests {
     use super::*;
     use std::collections::HashSet;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{timeout, Duration};
+    use tokio::task::yield_now;
 
     #[tokio::test]
     async fn test_assign_task_chooses_least_loaded() {
@@ -358,7 +359,25 @@ mod tests {
             task_count: 4,
         })
         .unwrap();
-        sleep(Duration::from_millis(50)).await;
+
+        // Wait until the update is processed
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if lb
+                    .nodes
+                    .read()
+                    .await
+                    .get(&node)
+                    .map(|n| n.task_count)
+                    == Some(4)
+                {
+                    break;
+                }
+                yield_now().await;
+            }
+        })
+        .await
+        .expect("load update");
         let nodes = lb.nodes.read().await;
         let count = nodes.get(&node).unwrap().task_count;
         assert_eq!(count, 4);
@@ -379,13 +398,25 @@ mod tests {
             task_count: 1,
         })
         .unwrap();
-        sleep(Duration::from_millis(50)).await;
         tx.send(NodeLoadInfo {
             node_id: node,
             task_count: 3,
         })
         .unwrap();
-        sleep(Duration::from_millis(50)).await;
+
+        // Wait for heap to reflect the latest update
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let heap = lb.heap.read().await;
+                if heap.len() == 1 && heap.peek().unwrap().task_count == 3 {
+                    break;
+                }
+                drop(heap);
+                yield_now().await;
+            }
+        })
+        .await
+        .expect("heap update");
         let heap = lb.heap.read().await;
         assert_eq!(heap.len(), 1);
         let entry = heap.peek().unwrap();
