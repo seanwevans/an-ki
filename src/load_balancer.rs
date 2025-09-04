@@ -1,4 +1,8 @@
-// load_balancer.rs: Implements load balancing for An nodes to effectively distribute tasks.
+//! Load balancing for assigning work to nodes.
+//!
+//! The [`LoadBalancer`] maintains a set of active nodes and distributes work to the
+//! least loaded node. It uses a binary heap to efficiently choose candidates and
+//! exposes helpers for updating load information.
 
 use rand::seq::IteratorRandom;
 use std::cmp::Ordering;
@@ -6,12 +10,15 @@ use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
+/// Stores the current task load for a node.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NodeLoadInfo {
+    /// Unique identifier of the node.
     pub node_id: Uuid,
+    /// Number of tasks currently assigned to the node.
     pub task_count: usize,
 }
 
@@ -31,9 +38,12 @@ impl PartialOrd for NodeLoadInfo {
     }
 }
 
+/// Coordinates task distribution among nodes.
 #[derive(Clone)]
 pub struct LoadBalancer {
+    /// Mapping of node identifiers to their load information.
     pub nodes: Arc<RwLock<HashMap<Uuid, NodeLoadInfo>>>,
+    /// Min-heap of nodes ordered by [`NodeLoadInfo::task_count`].
     pub heap: Arc<RwLock<BinaryHeap<NodeLoadInfo>>>,
 }
 
@@ -44,6 +54,7 @@ impl Default for LoadBalancer {
 }
 
 impl LoadBalancer {
+    /// Creates an empty [`LoadBalancer`].
     pub fn new() -> Self {
         LoadBalancer {
             nodes: Arc::new(RwLock::new(HashMap::new())),
@@ -51,6 +62,10 @@ impl LoadBalancer {
         }
     }
 
+    /// Registers a new node with zero initial load.
+    ///
+    /// # Parameters
+    /// * `node_id` - Identifier of the node to add.
     pub async fn add_node(&self, node_id: Uuid) {
         let mut nodes = self.nodes.write().await;
         let info = NodeLoadInfo {
@@ -64,6 +79,10 @@ impl LoadBalancer {
         info!("Added node to load balancer: {}", node_id);
     }
 
+    /// Removes a node from the balancer.
+    ///
+    /// # Parameters
+    /// * `node_id` - Identifier of the node to remove.
     pub async fn remove_node(&self, node_id: &Uuid) {
         let mut nodes = self.nodes.write().await;
         if nodes.remove(node_id).is_some() {
@@ -80,8 +99,21 @@ impl LoadBalancer {
         }
     }
 
+    /// Assigns a task to the least-loaded node.
+    ///
+    /// # Returns
+    /// * `Some(Uuid)` - Identifier of the chosen node.
+    /// * `None` - No nodes were available for assignment.
     pub async fn assign_task(&self) -> Option<Uuid> {
+        let max_iterations = self.nodes.read().await.len().max(1);
+        let mut attempts = 0;
         loop {
+            if attempts >= max_iterations {
+                warn!("assign_task iteration limit reached: {}", max_iterations);
+                return None;
+            }
+            attempts += 1;
+
             let candidate = {
                 let mut heap = self.heap.write().await;
                 heap.pop()
@@ -107,6 +139,8 @@ impl LoadBalancer {
                         let mut heap = self.heap.write().await;
                         heap.push(updated);
                     }
+                } else {
+                    warn!("Stale heap entry for node: {}", node_info.node_id);
                 }
                 // Node might have been removed; continue loop
             } else {
@@ -116,6 +150,10 @@ impl LoadBalancer {
         }
     }
 
+    /// Decrements the load count for a node after task completion.
+    ///
+    /// # Parameters
+    /// * `node_id` - Identifier of the node whose load should decrease.
     pub async fn complete_task(&self, node_id: &Uuid) {
         let mut nodes = self.nodes.write().await;
         if let Some(entry) = nodes.get_mut(node_id) {
@@ -145,12 +183,21 @@ impl LoadBalancer {
         }
     }
 
+    /// Returns a random node identifier or `None` if the balancer is empty.
     pub async fn random_node(&self) -> Option<Uuid> {
         let nodes = self.nodes.read().await;
         nodes.keys().copied().choose(&mut rand::thread_rng())
     }
 }
 
+/// Updates the load balancer using load reports from nodes.
+///
+/// The function listens on `rx` for [`NodeLoadInfo`] messages and updates the
+/// balancer to reflect the reported task counts.
+///
+/// # Parameters
+/// * `rx` - Channel receiving load updates from nodes.
+/// * `load_balancer` - Shared load balancer to update.
 pub async fn monitor_node_load(
     mut rx: broadcast::Receiver<NodeLoadInfo>,
     load_balancer: LoadBalancer,
@@ -185,7 +232,8 @@ pub async fn monitor_node_load(
 mod tests {
     use super::*;
     use std::collections::HashSet;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{timeout, Duration};
+    use tokio::task::yield_now;
 
     #[tokio::test]
     async fn test_assign_task_chooses_least_loaded() {
@@ -344,6 +392,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_assign_task_handles_stale_heap_entry() {
+        let lb = LoadBalancer::new();
+        let node = Uuid::new_v4();
+
+        lb.add_node(node).await;
+
+        // Remove node from nodes map but leave its entry in the heap
+        {
+            let mut nodes = lb.nodes.write().await;
+            nodes.remove(&node);
+        }
+
+        let assigned = lb.assign_task().await;
+        assert!(assigned.is_none());
+
+        let heap = lb.heap.read().await;
+        assert!(heap.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_monitor_node_load_updates() {
         let lb = LoadBalancer::new();
         let node = Uuid::new_v4();
@@ -358,7 +426,25 @@ mod tests {
             task_count: 4,
         })
         .unwrap();
-        sleep(Duration::from_millis(50)).await;
+
+        // Wait until the update is processed
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if lb
+                    .nodes
+                    .read()
+                    .await
+                    .get(&node)
+                    .map(|n| n.task_count)
+                    == Some(4)
+                {
+                    break;
+                }
+                yield_now().await;
+            }
+        })
+        .await
+        .expect("load update");
         let nodes = lb.nodes.read().await;
         let count = nodes.get(&node).unwrap().task_count;
         assert_eq!(count, 4);
@@ -379,13 +465,25 @@ mod tests {
             task_count: 1,
         })
         .unwrap();
-        sleep(Duration::from_millis(50)).await;
         tx.send(NodeLoadInfo {
             node_id: node,
             task_count: 3,
         })
         .unwrap();
-        sleep(Duration::from_millis(50)).await;
+
+        // Wait for heap to reflect the latest update
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let heap = lb.heap.read().await;
+                if heap.len() == 1 && heap.peek().unwrap().task_count == 3 {
+                    break;
+                }
+                drop(heap);
+                yield_now().await;
+            }
+        })
+        .await
+        .expect("heap update");
         let heap = lb.heap.read().await;
         assert_eq!(heap.len(), 1);
         let entry = heap.peek().unwrap();

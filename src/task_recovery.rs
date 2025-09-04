@@ -1,4 +1,7 @@
-// task_recovery.rs: Implements task persistence and recovery for robustness.
+//! Task persistence and recovery utilities.
+//!
+//! The [`TaskRecoveryManager`] persists tasks to a PostgreSQL database so they can
+//! be restored after failures and tracks them in an in-memory map.
 
 use crate::common::{Task, TaskType};
 use crate::database::PgPool;
@@ -10,13 +13,20 @@ use uuid::Uuid;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
+/// Persists tasks to durable storage and reloads them on startup.
 #[derive(Clone)]
 pub struct TaskRecoveryManager {
+    /// In-memory cache of tasks keyed by ID.
     pub tasks: Arc<RwLock<HashMap<Uuid, Task>>>,
+    /// Database connection pool used for persistence operations.
     pub pool: PgPool,
 }
 
 impl TaskRecoveryManager {
+    /// Creates a new [`TaskRecoveryManager`].
+    ///
+    /// # Parameters
+    /// * `pool` - Connection pool for the tasks database.
     pub fn new(pool: PgPool) -> Self {
         TaskRecoveryManager {
             tasks: Arc::new(RwLock::new(HashMap::new())),
@@ -30,6 +40,13 @@ impl TaskRecoveryManager {
     /// the write lock is not held across an await. If persistence fails at any stage,
     /// the in-memory insertion is rolled back and an error is returned so callers can
     /// react accordingly.
+    ///
+    /// # Parameters
+    /// * `task` - Task to persist.
+    ///
+    /// # Errors
+    /// Returns an error if a database connection cannot be acquired or the insert
+    /// statement fails.
     pub async fn add_task(&self, task: Task) -> Result<(), Error> {
         let mut tasks = self.tasks.write().await;
         tasks.insert(task.task_id, task.clone());
@@ -67,6 +84,10 @@ ON CONFLICT (task_id) DO UPDATE SET task_type=$2, data=$3",
         Ok(())
     }
 
+    /// Removes a task from both memory and the database.
+    ///
+    /// # Parameters
+    /// * `task_id` - Identifier of the task to remove.
     pub async fn remove_task(&self, task_id: &Uuid) {
         let mut tasks = self.tasks.write().await;
         if tasks.remove(task_id).is_some() {
@@ -87,6 +108,10 @@ ON CONFLICT (task_id) DO UPDATE SET task_type=$2, data=$3",
         }
     }
 
+    /// Reloads all tasks from the database into memory.
+    ///
+    /// # Errors
+    /// Returns an error if the query to fetch tasks fails.
     pub async fn recover_tasks(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let conn = self.pool.get().await?;
         let rows = conn
@@ -128,7 +153,8 @@ mod tests {
     use bb8::Pool;
     use bb8_postgres::PostgresConnectionManager;
     use std::str::FromStr;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{timeout, Duration};
+    use tokio::task::yield_now;
     use tokio_postgres::{Config, NoTls};
 
     #[tokio::test]
@@ -279,14 +305,24 @@ mod tests {
             manager_clone.add_task(task_clone).await.unwrap();
         });
 
-        // Give add_task a moment to insert the task and reach the awaiting connection.
-        sleep(Duration::from_millis(100)).await;
+        // Wait for the task to be inserted before proceeding.
+        let task_id = task.task_id;
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if recovery_manager.tasks.read().await.contains_key(&task_id) {
+                    break;
+                }
+                yield_now().await;
+            }
+        })
+        .await
+        .expect("task inserted");
 
         // We should be able to read the task while the DB operation is waiting, proving
         // the write lock was released.
         {
             let tasks = recovery_manager.tasks.read().await;
-            assert!(tasks.contains_key(&task.task_id));
+            assert!(tasks.contains_key(&task_id));
         }
 
         // Release the connection so add_task can complete.
