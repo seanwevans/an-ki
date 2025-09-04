@@ -15,11 +15,13 @@ use std::num::NonZeroU32;
 use std::time::{SystemTime, UNIX_EPOCH};
 use webpki::{EndEntityCert, Time, TrustAnchor, ECDSA_P256_SHA256};
 
+use once_cell::sync::OnceCell;
 use std::env;
 use std::error::Error;
 use tracing::info;
 
 use crate::common::NodeRole;
+use crate::error::AnKiError;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -28,8 +30,16 @@ pub struct Claims {
     pub exp: usize,     // Expiration time as a UNIX timestamp
 }
 
-fn get_secret_key() -> Result<String, env::VarError> {
-    env::var("JWT_SECRET_KEY")
+static JWT_SECRET_KEY: OnceCell<String> = OnceCell::new();
+
+fn get_secret_key() -> Result<&'static str, Box<dyn Error>> {
+    JWT_SECRET_KEY
+        .get_or_try_init(|| {
+            env::var("JWT_SECRET_KEY").map_err(|_| {
+                Box::<dyn Error>::from("JWT_SECRET_KEY environment variable is not set")
+            })
+        })
+        .map(|s| s.as_str())
 }
 
 pub fn generate_token(
@@ -48,7 +58,7 @@ pub fn generate_token(
     let token = encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(secret_key.as_ref()),
+        &EncodingKey::from_secret(secret_key.as_bytes()),
     )?;
     info!(
         "Generated token for node_id: {} with role: {:?}",
@@ -61,7 +71,7 @@ pub fn verify_token(token: &str) -> Result<TokenData<Claims>, Box<dyn Error>> {
     let secret_key = get_secret_key()?;
     let token_data = decode::<Claims>(
         token,
-        &DecodingKey::from_secret(secret_key.as_ref()),
+        &DecodingKey::from_secret(secret_key.as_bytes()),
         &Validation::default(),
     )?;
     info!(
@@ -117,11 +127,13 @@ pub fn encrypt_message(message: &str, key: &str) -> Result<String, Box<dyn Error
     Ok(general_purpose::STANDARD.encode(&combined))
 }
 
-pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, Box<dyn Error>> {
-    let decoded_bytes = general_purpose::STANDARD.decode(encoded_message)?;
+pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, AnKiError> {
+    let decoded_bytes = general_purpose::STANDARD
+        .decode(encoded_message)
+        .map_err(|e| AnKiError::CryptoError(e.to_string()))?;
 
     if decoded_bytes.len() < SALT_LEN + NONCE_LEN {
-        return Err("Invalid encrypted message".into());
+        return Err(AnKiError::InvalidCiphertext);
     }
 
     // Split salt, nonce, and ciphertext
@@ -143,8 +155,9 @@ pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, Box<d
     let nonce = Nonce::from_slice(nonce_bytes);
     let plaintext = cipher
         .decrypt(nonce, ciphertext)
-        .map_err(|e| Box::<dyn Error>::from(e.to_string()))?;
-    let decrypted_message = String::from_utf8(plaintext)?;
+        .map_err(|e| AnKiError::CryptoError(e.to_string()))?;
+    let decrypted_message = String::from_utf8(plaintext)
+        .map_err(|e| AnKiError::CryptoError(e.to_string()))?;
     Ok(decrypted_message)
 }
 
@@ -198,8 +211,11 @@ mod tests {
     use super::{
         decrypt_message, encrypt_message, generate_challenge, generate_token, renew_token,
         sign_challenge, validate_certificate, verify_challenge, verify_token, Claims,
+        NONCE_LEN, SALT_LEN,
     };
     use crate::common::NodeRole;
+    use crate::error::AnKiError;
+    use base64::{engine::general_purpose, Engine as _};
     use rcgen::{
         BasicConstraints, Certificate as RcCertificate, CertificateParams, ExtendedKeyUsagePurpose,
         IsCa,
@@ -220,6 +236,7 @@ mod tests {
 
         assert_eq!(sub, node_id);
         assert_eq!(claim_role, role);
+        std::env::remove_var("JWT_SECRET_KEY");
     }
 
     #[test]
@@ -240,6 +257,17 @@ mod tests {
 
         // Decryption should fail with an incorrect key
         assert!(decrypt_message(&encrypted_message1, "wrong_key").is_err());
+
+        // Truncated ciphertext should return InvalidCiphertext
+        let mut truncated = general_purpose::STANDARD
+            .decode(&encrypted_message1)
+            .unwrap();
+        truncated.truncate(SALT_LEN + NONCE_LEN - 1);
+        let truncated = general_purpose::STANDARD.encode(&truncated);
+        assert!(matches!(
+            decrypt_message(&truncated, key),
+            Err(AnKiError::InvalidCiphertext)
+        ));
     }
 
     #[test]
@@ -249,6 +277,7 @@ mod tests {
         let renewed = renew_token(&token, 60).unwrap();
         let data = verify_token(&renewed).unwrap();
         assert_eq!(data.claims.sub, "node");
+        std::env::remove_var("JWT_SECRET_KEY");
     }
 
     #[test]
