@@ -134,9 +134,15 @@ async fn setup_consumer(
     queue_name: &str,
     consumer_tag: &str,
 ) -> Result<(Channel, Consumer), Box<dyn Error>> {
-    let channel = messaging::establish_connection(amqp_addr).await?;
-    messaging::declare_queue(&channel, queue_name).await?;
-    let consumer = messaging::consume_messages(&channel, queue_name, consumer_tag).await?;
+    let channel = messaging::establish_connection(amqp_addr)
+        .await
+        .map_err(|e| Box::<dyn Error>::from(e))?;
+    messaging::declare_queue(&channel, queue_name)
+        .await
+        .map_err(|e| Box::<dyn Error>::from(e))?;
+    let consumer = messaging::consume_messages(&channel, queue_name, consumer_tag)
+        .await
+        .map_err(|e| Box::<dyn Error>::from(e))?;
     Ok((channel, consumer))
 }
 
@@ -184,7 +190,9 @@ async fn send_result(result: Task, channel: &Channel) -> Result<(), Box<dyn Erro
         e
     })?;
 
-    messaging::publish_message(channel, result_queue, &payload).await?;
+    messaging::publish_message(channel, result_queue, &payload)
+        .await
+        .map_err(|e| Box::<dyn Error>::from(e))?;
     info!("Sent result for task ID: {}", result.task_id);
     Ok(())
 }

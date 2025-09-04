@@ -19,6 +19,7 @@ mod principal;
 mod security;
 mod signals;
 mod task_recovery;
+mod error;
 
 #[tokio::main]
 async fn main() {

@@ -1,7 +1,6 @@
 // network.rs: Abstracts network operations such as connecting nodes and handling retries.
 
 use std::collections::HashSet;
-use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -12,6 +11,7 @@ use tokio_rustls::{
     TlsConnector,
 };
 use tracing::{error, info};
+use crate::error::AnKiError;
 
 #[derive(Clone, Debug)]
 pub struct NetworkManager {
@@ -35,14 +35,20 @@ impl NetworkManager {
         timeout_duration: Duration,
         base_delay: Duration,
         max_backoff: Duration,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), AnKiError> {
         for attempt in 0..retry_count {
             let connector = TlsConnector::from(self.tls_config.clone());
-            let domain_name = ServerName::try_from(domain).map_err(|e| format!("{e:?}"))?;
+            let domain_name = ServerName::try_from(domain)
+                .map_err(|e| AnKiError::Network(e.to_string()))?;
             let fut = async {
-                let tcp = TcpStream::connect(address).await?;
-                let _tls = connector.connect(domain_name, tcp).await?;
-                Ok::<(), Box<dyn Error>>(())
+                let tcp = TcpStream::connect(address)
+                    .await
+                    .map_err(|e| AnKiError::Network(e.to_string()))?;
+                let _tls = connector
+                    .connect(domain_name, tcp)
+                    .await
+                    .map_err(|e| AnKiError::Network(e.to_string()))?;
+                Ok::<(), AnKiError>(())
             };
 
             match timeout(timeout_duration, fut).await {
@@ -76,7 +82,7 @@ impl NetworkManager {
                 sleep(delay).await;
             }
         }
-        Err("Failed to connect after retries".into())
+        Err(AnKiError::Network("Failed to connect after retries".into()))
     }
 
     pub async fn disconnect_node(&self, address: &SocketAddr) {

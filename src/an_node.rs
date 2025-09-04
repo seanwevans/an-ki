@@ -137,9 +137,15 @@ async fn setup_consumer(
     queue_name: &str,
     consumer_tag: &str,
 ) -> Result<(Channel, Consumer), Box<dyn Error>> {
-    let channel = messaging::establish_connection(amqp_addr).await?;
-    messaging::declare_queue(&channel, queue_name).await?;
-    let consumer = messaging::consume_messages(&channel, queue_name, consumer_tag).await?;
+    let channel = messaging::establish_connection(amqp_addr)
+        .await
+        .map_err(|e| Box::<dyn Error>::from(e))?;
+    messaging::declare_queue(&channel, queue_name)
+        .await
+        .map_err(|e| Box::<dyn Error>::from(e))?;
+    let consumer = messaging::consume_messages(&channel, queue_name, consumer_tag)
+        .await
+        .map_err(|e| Box::<dyn Error>::from(e))?;
     Ok((channel, consumer))
 }
 
@@ -196,9 +202,13 @@ async fn broadcast_model(model: &[f32], channel: &Channel) -> Result<(), Box<dyn
         task_type: TaskType::ParameterPull,
         data: serde_json::to_string(model)?,
     };
-    messaging::declare_queue(channel, "ki_model_queue").await?;
+    messaging::declare_queue(channel, "ki_model_queue")
+        .await
+        .map_err(|e| Box::<dyn Error>::from(e))?;
     let payload = serde_json::to_vec(&task)?;
-    messaging::publish_message(channel, "ki_model_queue", &payload).await?;
+    messaging::publish_message(channel, "ki_model_queue", &payload)
+        .await
+        .map_err(|e| Box::<dyn Error>::from(e))?;
     info!("Broadcasted model update");
     Ok(())
 }
