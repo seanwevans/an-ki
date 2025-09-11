@@ -11,6 +11,7 @@ use futures_util::stream::StreamExt;
 use lapin::{
     options::{BasicAckOptions, BasicNackOptions},
     Channel,
+    Consumer,
 };
 use lazy_static::lazy_static;
 use tokio::sync::{oneshot, Mutex};
