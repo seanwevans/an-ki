@@ -104,23 +104,6 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn setup_consumer(
-    amqp_addr: &str,
-    queue_name: &str,
-    consumer_tag: &str,
-) -> Result<(Channel, Consumer), Box<dyn Error>> {
-    let channel = messaging::establish_connection(amqp_addr)
-        .await
-        .map_err(|e| Box::<dyn Error>::from(e))?;
-    messaging::declare_queue(&channel, queue_name)
-        .await
-        .map_err(|e| Box::<dyn Error>::from(e))?;
-    let consumer = messaging::consume_messages(&channel, queue_name, consumer_tag)
-        .await
-        .map_err(|e| Box::<dyn Error>::from(e))?;
-    Ok((channel, consumer))
-}
-
 async fn perform_computation(task: Task) -> Result<Task, Box<dyn Error>> {
     match task.task_type {
         TaskType::GradientUpdate => {
