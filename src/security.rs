@@ -15,10 +15,8 @@ use std::num::NonZeroU32;
 use std::time::{SystemTime, UNIX_EPOCH};
 use webpki::{EndEntityCert, Time, TrustAnchor, ECDSA_P256_SHA256};
 
-use once_cell::sync::OnceCell;
 use std::env;
 use tracing::info;
-use crate::error::AnKiError;
 
 use crate::common::NodeRole;
 use crate::error::AnKiError;
@@ -124,10 +122,10 @@ pub fn encrypt_message(message: &str, key: &str) -> Result<String, AnKiError> {
 pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, AnKiError> {
     let decoded_bytes = general_purpose::STANDARD
         .decode(encoded_message)
-        .map_err(|e| AnKiError::Security(e.to_string()))?;
+        .map_err(|_| AnKiError::InvalidCiphertext)?;
 
     if decoded_bytes.len() < SALT_LEN + NONCE_LEN {
-        return Err(AnKiError::Security("Invalid encrypted message".into()));
+        return Err(AnKiError::InvalidCiphertext);
     }
 
     // Split salt, nonce, and ciphertext
@@ -149,10 +147,8 @@ pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, AnKiE
     let nonce = Nonce::from_slice(nonce_bytes);
     let plaintext = cipher
         .decrypt(nonce, ciphertext)
-        .map_err(|e| AnKiError::Security(e.to_string()))?;
-    let decrypted_message = String::from_utf8(plaintext)
-        .map_err(|e| AnKiError::Security(e.to_string()))?;
-    Ok(decrypted_message)
+        .map_err(|_| AnKiError::InvalidCiphertext)?;
+    String::from_utf8(plaintext).map_err(|_| AnKiError::InvalidCiphertext)
 }
 
 /// Validates `cert_der` against the provided CA certificate `ca_der`.

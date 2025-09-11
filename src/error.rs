@@ -14,5 +14,7 @@ pub enum AnKiError {
     Scheduler(String),
     #[error("Task recovery error: {0}")]
     TaskRecovery(String),
+    #[error("Invalid ciphertext")]
+    InvalidCiphertext,
 }
 
