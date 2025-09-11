@@ -13,8 +13,7 @@ use lapin::{
     Channel,
     Consumer,
 };
-use lazy_static::lazy_static;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::oneshot;
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -48,14 +47,9 @@ impl AnNodeState {
                     self.grad_accum.1 += 1;
                     if self.grad_accum.1 >= shard_count {
                         if self.model_params.is_empty() {
-                            self.model_params
-                                .resize(self.grad_accum.0.len(), 0.0);
+                            self.model_params.resize(self.grad_accum.0.len(), 0.0);
                         }
-                        for (m, a) in self
-                            .model_params
-                            .iter_mut()
-                            .zip(self.grad_accum.0.iter())
-                        {
+                        for (m, a) in self.model_params.iter_mut().zip(self.grad_accum.0.iter()) {
                             *m -= *a / shard_count as f32;
                         }
                         let model_clone = self.model_params.clone();
@@ -187,89 +181,6 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-}
-
-
-async fn setup_consumer(
-    amqp_addr: &str,
-    queue_name: &str,
-    consumer_tag: &str,
-) -> Result<(Channel, Consumer), Box<dyn Error>> {
-    let channel = messaging::establish_connection(amqp_addr)
-        .await
-        .map_err(|e| Box::<dyn Error>::from(e))?;
-    messaging::declare_queue(&channel, queue_name)
-        .await
-        .map_err(|e| Box::<dyn Error>::from(e))?;
-    let consumer = messaging::consume_messages(&channel, queue_name, consumer_tag)
-        .await
-        .map_err(|e| Box::<dyn Error>::from(e))?;
-    Ok((channel, consumer))
-}
-
-async fn process_task(
-    task: Task,
-    channel: Option<&Channel>,
-    shard_count: usize,
-) -> Result<(), Box<dyn Error>> {
-    match task.task_type {
-        TaskType::GradientUpdate => {
-            let gradient: Vec<f32> = serde_json::from_str(&task.data)?;
-            let broadcast_data = {
-                let mut acc = GRAD_ACCUM.lock().await;
-                if acc.0.is_empty() {
-                    acc.0 = vec![0.0; gradient.len()];
-                }
-                for (a, g) in acc.0.iter_mut().zip(&gradient) {
-                    *a += g;
-                }
-                acc.1 += 1;
-                if acc.1 >= shard_count {
-                    let mut model = MODEL_PARAMS.lock().await;
-                    if model.is_empty() {
-                        model.resize(acc.0.len(), 0.0);
-                    }
-                    for (m, a) in model.iter_mut().zip(acc.0.iter()) {
-                        *m -= *a / shard_count as f32;
-                    }
-                    let model_clone = model.clone();
-                    acc.0.iter_mut().for_each(|v| *v = 0.0);
-                    acc.1 = 0;
-                    Some(model_clone)
-                } else {
-                    None
-                }
-            };
-            if let (Some(ch), Some(model)) = (channel, broadcast_data) {
-                broadcast_model(&model, ch).await?;
-            }
-        }
-        TaskType::ParameterPull => {
-            if let Some(ch) = channel {
-                let model = MODEL_PARAMS.lock().await.clone();
-                broadcast_model(&model, ch).await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn broadcast_model(model: &[f32], channel: &Channel) -> Result<(), Box<dyn Error>> {
-    let task = Task {
-        task_id: Uuid::new_v4(),
-        task_type: TaskType::ParameterPull,
-        data: serde_json::to_string(model)?,
-    };
-    messaging::declare_queue(channel, "ki_model_queue")
-        .await
-        .map_err(|e| Box::<dyn Error>::from(e))?;
-    let payload = serde_json::to_vec(&task)?;
-    messaging::publish_message(channel, "ki_model_queue", &payload)
-        .await
-        .map_err(|e| Box::<dyn Error>::from(e))?;
-    info!("Broadcasted model update");
-    Ok(())
-
 }
 
 #[cfg(test)]
