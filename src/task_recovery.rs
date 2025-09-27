@@ -9,7 +9,7 @@ use crate::error::AnKiError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -79,24 +79,30 @@ ON CONFLICT (task_id) DO UPDATE SET task_type=$2, data=$3",
     ///
     /// # Parameters
     /// * `task_id` - Identifier of the task to remove.
-    pub async fn remove_task(&self, task_id: &Uuid) {
+    pub async fn remove_task(&self, task_id: &Uuid) -> bool {
         let mut tasks = self.tasks.write().await;
-        if tasks.remove(task_id).is_some() {
-            info!("Removed task from recovery manager: {}", task_id);
-            match self.pool.get().await {
-                Ok(conn) => {
-                    if let Err(e) = conn
-                        .execute("DELETE FROM tasks WHERE task_id = $1", &[task_id])
-                        .await
-                    {
-                        error!("Failed to remove task from database: {:?}", e);
-                    }
-                }
-                Err(e) => error!("Failed to acquire connection: {:?}", e),
-            }
-        } else {
-            error!("Task not found for removal: {}", task_id);
+        let existed = tasks.remove(task_id).is_some();
+        drop(tasks);
+
+        if !existed {
+            debug!("Task not found for removal: {}", task_id);
+            return false;
         }
+
+        info!("Removed task from recovery manager: {}", task_id);
+        match self.pool.get().await {
+            Ok(conn) => {
+                if let Err(e) = conn
+                    .execute("DELETE FROM tasks WHERE task_id = $1", &[task_id])
+                    .await
+                {
+                    error!("Failed to remove task from database: {:?}", e);
+                }
+            }
+            Err(e) => error!("Failed to acquire connection: {:?}", e),
+        }
+
+        true
     }
 
     pub async fn recover_tasks(&self) -> Result<(), AnKiError> {

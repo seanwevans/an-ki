@@ -92,8 +92,14 @@ async fn delete_task_handler(
     task_id: Uuid,
     task_manager: Arc<TaskRecoveryManager>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    task_manager.remove_task(&task_id).await;
-    Ok(warp::reply::with_status("Task deleted", StatusCode::OK))
+    if task_manager.remove_task(&task_id).await {
+        Ok(warp::reply::with_status("Task deleted", StatusCode::OK))
+    } else {
+        Ok(warp::reply::with_status(
+            "Task not found",
+            StatusCode::NOT_FOUND,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -165,5 +171,12 @@ mod tests {
             .reply(&api.filters())
             .await;
         assert_eq!(res.status(), StatusCode::OK);
+
+        let res = request()
+            .method("DELETE")
+            .path(&format!("/tasks/{}", task.task_id))
+            .reply(&api.filters())
+            .await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }
