@@ -11,7 +11,6 @@ use futures_util::stream::StreamExt;
 use lapin::{
     options::{BasicAckOptions, BasicNackOptions},
     Channel,
-    Consumer,
 };
 use tokio::sync::oneshot;
 use tracing::{error, info};
