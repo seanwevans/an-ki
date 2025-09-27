@@ -187,10 +187,13 @@ async fn perform_computation(task: Task) -> Result<Task, Box<dyn Error>> {
             }
             #[cfg(not(feature = "tch"))]
             {
+                let input: Vec<f32> = serde_json::from_str(&task.data)?;
+                let grad: Vec<f32> = input.into_iter().map(|v| v * 2.0).collect();
+                let data = serde_json::to_string(&grad)?;
                 Ok(Task {
                     task_id: task.task_id,
                     task_type: TaskType::GradientUpdate,
-                    data: format!("Processed data: {}", task.data),
+                    data,
                 })
             }
         }
@@ -223,6 +226,8 @@ async fn send_result(result: Task, channel: &Channel) -> Result<(), Box<dyn Erro
 mod tests {
     use super::*;
     use crate::common::{Task, TaskType};
+    #[cfg(not(feature = "tch"))]
+    use crate::an_node::AnNodeState;
 
     #[test]
     fn test_update_model_parameters() {
@@ -247,6 +252,34 @@ mod tests {
         let result = perform_computation(task.clone()).await.unwrap();
         assert_eq!(result.task_type, TaskType::ParameterPull);
         assert_eq!(result.task_id, task.task_id);
+    }
+
+    #[cfg(not(feature = "tch"))]
+    #[tokio::test]
+    async fn test_perform_computation_gradient_update_non_tch() {
+        let task = Task {
+            task_id: uuid::Uuid::new_v4(),
+            task_type: TaskType::GradientUpdate,
+            data: serde_json::to_string(&vec![1.0_f32, -0.5_f32]).unwrap(),
+        };
+        let result = perform_computation(task.clone()).await.unwrap();
+        assert_eq!(result.task_id, task.task_id);
+        assert_eq!(result.task_type, TaskType::GradientUpdate);
+        let gradient: Vec<f32> = serde_json::from_str(&result.data).unwrap();
+        assert_eq!(gradient, vec![2.0_f32, -1.0_f32]);
+    }
+
+    #[cfg(not(feature = "tch"))]
+    #[tokio::test]
+    async fn test_an_node_processes_ki_payload() {
+        let task = Task {
+            task_id: uuid::Uuid::new_v4(),
+            task_type: TaskType::GradientUpdate,
+            data: serde_json::to_string(&vec![0.25_f32, 0.5_f32]).unwrap(),
+        };
+        let result = perform_computation(task).await.unwrap();
+        let mut state = AnNodeState::new();
+        assert!(state.process_task(result, None, 1).await.is_ok());
     }
 
     #[cfg(feature = "integration-tests")]
