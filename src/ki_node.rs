@@ -11,6 +11,29 @@ use std::error::Error;
 use tokio::sync::oneshot;
 use tracing::{error, info};
 
+#[derive(Default)]
+struct KiNodeState {
+    model_params: Vec<f32>,
+}
+
+impl KiNodeState {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn update_model(&mut self, task: &Task) -> Result<(), serde_json::Error> {
+        let params: Vec<f32> = serde_json::from_str(&task.data)?;
+        self.model_params = params;
+        info!("Updated local model parameters");
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn parameters(&self) -> &[f32] {
+        &self.model_params
+    }
+}
+
 #[cfg(feature = "tch")]
 use tch::Tensor;
 
@@ -45,12 +68,25 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let queue_name = "ki_task_queue";
     let consumer_tag = "ki_consumer";
+    let model_queue_name = "ki_model_queue";
+    let model_consumer_tag = "ki_model_consumer";
+
+    let mut state = KiNodeState::new();
 
     loop {
         let (channel, mut consumer) = messaging::connect_with_retries(
             &amqp_addr,
             queue_name,
             consumer_tag,
+            max_retries,
+            backoff_ms,
+        )
+        .await?;
+
+        let (_model_channel, mut model_consumer) = messaging::connect_with_retries(
+            &amqp_addr,
+            model_queue_name,
+            model_consumer_tag,
             max_retries,
             backoff_ms,
         )
@@ -95,6 +131,34 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                         }
                         None => {
                             error!("Consumer stream closed");
+                            break;
+                        }
+                    }
+                }
+                model_delivery = model_consumer.next() => {
+                    match model_delivery {
+                        Some(Ok(delivery)) => {
+                            match serde_json::from_slice::<Task>(&delivery.data) {
+                                Ok(task_message) => {
+                                    if let Err(e) = state.update_model(&task_message) {
+                                        error!("Failed to update model parameters: {:?}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to deserialize model update: {:?}", e);
+                                }
+                            }
+
+                            if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
+                                error!("Failed to acknowledge model update: {:?}", e);
+                            }
+                        }
+                        Some(Err(e)) => {
+                            error!("Error in model consumer stream: {:?}", e);
+                            break;
+                        }
+                        None => {
+                            error!("Model consumer stream closed");
                             break;
                         }
                     }
@@ -160,6 +224,19 @@ mod tests {
     use super::*;
     use crate::common::{Task, TaskType};
 
+    #[test]
+    fn test_update_model_parameters() {
+        let mut state = KiNodeState::new();
+        let task = Task {
+            task_id: uuid::Uuid::new_v4(),
+            task_type: TaskType::ParameterPull,
+            data: serde_json::to_string(&vec![1.0_f32, 2.5_f32]).unwrap(),
+        };
+
+        state.update_model(&task).unwrap();
+        assert_eq!(state.parameters(), &[1.0_f32, 2.5_f32]);
+    }
+
     #[tokio::test]
     async fn test_perform_computation_parameter_pull() {
         let task = Task {
@@ -215,5 +292,52 @@ mod tests {
             .ack(BasicAckOptions::default())
             .await
             .expect("ack result");
+    }
+
+    #[cfg(feature = "integration-tests")]
+    #[tokio::test]
+    async fn test_model_update_consumption() {
+        use futures_util::StreamExt;
+        use tokio::time::{timeout, Duration};
+
+        const AMQP_ADDR: &str = "amqp://127.0.0.1:5672/%2f";
+
+        let channel = match messaging::establish_connection(AMQP_ADDR).await {
+            Ok(ch) => ch,
+            Err(_) => return, // RabbitMQ not available
+        };
+
+        messaging::declare_queue(&channel, "ki_model_queue")
+            .await
+            .expect("declare model queue");
+
+        let payload_task = Task {
+            task_id: uuid::Uuid::new_v4(),
+            task_type: TaskType::ParameterPull,
+            data: serde_json::to_string(&vec![0.5_f32, -1.0_f32]).unwrap(),
+        };
+
+        let payload = serde_json::to_vec(&payload_task).expect("serialize task");
+        messaging::publish_message(&channel, "ki_model_queue", &payload)
+            .await
+            .expect("publish model update");
+
+        let mut consumer =
+            messaging::consume_messages(&channel, "ki_model_queue", "test_model_consumer")
+                .await
+                .expect("consume model queue");
+
+        if let Ok(Some(Ok(delivery))) = timeout(Duration::from_secs(5), consumer.next()).await {
+            let task: Task =
+                serde_json::from_slice(&delivery.data).expect("deserialize model task");
+            let mut state = KiNodeState::new();
+            state.update_model(&task).expect("update model");
+            assert_eq!(state.parameters(), &[0.5_f32, -1.0_f32]);
+
+            delivery
+                .ack(BasicAckOptions::default())
+                .await
+                .expect("ack model update");
+        }
     }
 }
