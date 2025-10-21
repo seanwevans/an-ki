@@ -1,4 +1,5 @@
 # Distributed Neural Network System
+<img width="256" alt="Neural Network Diagram on Teal Background" src="https://github.com/user-attachments/assets/063a74c0-0aed-4905-a72d-8236bdfd65b7" />
 
 A distributed neural network project that supports task scheduling, load balancing, fault tolerance, and secure communication across a network of nodes. This system is designed for high availability and scalability, with asynchronous operations, health monitoring, and leader election to ensure robustness.
 
