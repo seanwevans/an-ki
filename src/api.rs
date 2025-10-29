@@ -92,13 +92,19 @@ async fn delete_task_handler(
     task_id: Uuid,
     task_manager: Arc<TaskRecoveryManager>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    if task_manager.remove_task(&task_id).await {
-        Ok(warp::reply::with_status("Task deleted", StatusCode::OK))
-    } else {
-        Ok(warp::reply::with_status(
+    match task_manager.remove_task(&task_id).await {
+        Ok(true) => Ok(warp::reply::with_status("Task deleted", StatusCode::OK)),
+        Ok(false) => Ok(warp::reply::with_status(
             "Task not found",
             StatusCode::NOT_FOUND,
-        ))
+        )),
+        Err(e) => {
+            error!("Failed to delete task: {:?}", e);
+            Ok(warp::reply::with_status(
+                "Internal server error",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ))
+        }
     }
 }
 
@@ -127,7 +133,7 @@ mod tests {
             .reply(&api.filters())
             .await;
         assert_eq!(res.status(), StatusCode::CREATED);
-        task_manager.remove_task(&new_task.task_id).await;
+        assert!(task_manager.remove_task(&new_task.task_id).await.unwrap());
     }
 
     #[tokio::test]
@@ -149,7 +155,7 @@ mod tests {
             .reply(&api.filters())
             .await;
         assert_eq!(res.status(), StatusCode::OK);
-        task_manager.remove_task(&task.task_id).await;
+        assert!(task_manager.remove_task(&task.task_id).await.unwrap());
     }
 
     #[tokio::test]

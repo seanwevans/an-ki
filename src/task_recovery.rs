@@ -79,30 +79,35 @@ ON CONFLICT (task_id) DO UPDATE SET task_type=$2, data=$3",
     ///
     /// # Parameters
     /// * `task_id` - Identifier of the task to remove.
-    pub async fn remove_task(&self, task_id: &Uuid) -> bool {
+    pub async fn remove_task(&self, task_id: &Uuid) -> Result<bool, AnKiError> {
         let mut tasks = self.tasks.write().await;
         let existed = tasks.remove(task_id).is_some();
         drop(tasks);
 
         if !existed {
             debug!("Task not found for removal: {}", task_id);
-            return false;
+            return Ok(false);
         }
 
         info!("Removed task from recovery manager: {}", task_id);
-        match self.pool.get().await {
-            Ok(conn) => {
-                if let Err(e) = conn
-                    .execute("DELETE FROM tasks WHERE task_id = $1", &[task_id])
-                    .await
-                {
-                    error!("Failed to remove task from database: {:?}", e);
-                }
-            }
-            Err(e) => error!("Failed to acquire connection: {:?}", e),
-        }
+        let conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| {
+                error!("Failed to acquire connection: {:?}", e);
+                AnKiError::TaskRecovery(e.to_string())
+            })?;
 
-        true
+        conn
+            .execute("DELETE FROM tasks WHERE task_id = $1", &[task_id])
+            .await
+            .map_err(|e| {
+                error!("Failed to remove task from database: {:?}", e);
+                AnKiError::TaskRecovery(e.to_string())
+            })?;
+
+        Ok(true)
     }
 
     pub async fn recover_tasks(&self) -> Result<(), AnKiError> {
@@ -167,7 +172,7 @@ mod tests {
         };
 
         recovery_manager.add_task(task.clone()).await.unwrap();
-        recovery_manager.remove_task(&task.task_id).await;
+        assert!(recovery_manager.remove_task(&task.task_id).await.unwrap());
 
         // Recover tasks from database
         recovery_manager.add_task(task.clone()).await.unwrap();
