@@ -65,6 +65,10 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|_| "500".into())
         .parse()
         .unwrap_or(500);
+    let max_backoff_ms: u64 = std::env::var("AMQP_RECONNECT_MAX_BACKOFF_MS")
+        .unwrap_or_else(|_| "5000".into())
+        .parse()
+        .unwrap_or(5_000);
 
     let queue_name = "ki_task_queue";
     let consumer_tag = "ki_consumer";
@@ -80,6 +84,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             consumer_tag,
             max_retries,
             backoff_ms,
+            max_backoff_ms,
         )
         .await?;
 
@@ -89,6 +94,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             model_consumer_tag,
             max_retries,
             backoff_ms,
+            max_backoff_ms,
         )
         .await?;
 
