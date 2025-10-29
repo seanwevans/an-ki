@@ -15,7 +15,7 @@ use std::num::NonZeroU32;
 use std::time::{SystemTime, UNIX_EPOCH};
 use webpki::{EndEntityCert, Time, TrustAnchor, ECDSA_P256_SHA256};
 
-use std::env;
+use std::{env, fs};
 use tracing::info;
 
 use crate::common::NodeRole;
@@ -29,7 +29,19 @@ pub struct Claims {
 }
 
 fn get_secret_key() -> Result<String, AnKiError> {
-    env::var("JWT_SECRET_KEY").map_err(|e| AnKiError::Config(e.to_string()))
+    if let Ok(secret) = env::var("JWT_SECRET_KEY") {
+        return Ok(secret);
+    }
+
+    if let Ok(path) = env::var("JWT_SECRET_KEY_FILE") {
+        let secret = fs::read_to_string(&path)
+            .map_err(|e| AnKiError::Config(e.to_string()))?;
+        return Ok(secret.trim().to_owned());
+    }
+
+    crate::config::load_settings()
+        .map(|settings| settings.jwt_secret_key)
+        .map_err(|e| AnKiError::Config(e.to_string()))
 }
 
 pub fn generate_token(
@@ -212,14 +224,39 @@ mod tests {
     use crate::common::NodeRole;
     use crate::error::AnKiError;
     use base64::{engine::general_purpose, Engine as _};
+    use once_cell::sync::Lazy;
     use rcgen::{
         BasicConstraints, Certificate as RcCertificate, CertificateParams, ExtendedKeyUsagePurpose,
         IsCa,
     };
+    use std::fs;
+    use std::sync::Mutex;
+
+    static TEST_ENV_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn restore_env(key: &str, value: Option<String>) {
+        if let Some(val) = value {
+            std::env::set_var(key, val);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
+    fn clear_secret_overrides() {
+        std::env::remove_var("JWT_SECRET_KEY");
+        std::env::remove_var("JWT_SECRET_KEY_FILE");
+    }
 
     #[test]
-    fn test_generate_and_verify_token() {
-        std::env::set_var("JWT_SECRET_KEY", "test_secret_key");
+    fn test_generate_and_verify_token_from_settings() {
+        let _guard = TEST_ENV_GUARD.lock().unwrap();
+        let original_run_env = std::env::var("RUN_ENV").ok();
+        let original_secret = std::env::var("JWT_SECRET_KEY").ok();
+        let original_secret_file = std::env::var("JWT_SECRET_KEY_FILE").ok();
+
+        clear_secret_overrides();
+        std::env::set_var("RUN_ENV", "test_security");
+
         let node_id = "test_node";
         let role = NodeRole::An;
         let token = generate_token(node_id, role.clone(), 60).unwrap();
@@ -232,7 +269,67 @@ mod tests {
 
         assert_eq!(sub, node_id);
         assert_eq!(claim_role, role);
-        std::env::remove_var("JWT_SECRET_KEY");
+
+        let settings = crate::config::load_settings().unwrap();
+        assert_eq!(settings.jwt_secret_key, "test-security-secret");
+
+        restore_env("RUN_ENV", original_run_env);
+        restore_env("JWT_SECRET_KEY", original_secret);
+        restore_env("JWT_SECRET_KEY_FILE", original_secret_file);
+    }
+
+    #[test]
+    fn test_generate_and_verify_token_env_override() {
+        let _guard = TEST_ENV_GUARD.lock().unwrap();
+        let original_run_env = std::env::var("RUN_ENV").ok();
+        let original_secret = std::env::var("JWT_SECRET_KEY").ok();
+        let original_secret_file = std::env::var("JWT_SECRET_KEY_FILE").ok();
+
+        std::env::set_var("JWT_SECRET_KEY", "env_secret_key");
+        std::env::remove_var("RUN_ENV");
+        std::env::remove_var("JWT_SECRET_KEY_FILE");
+
+        let node_id = "env_node";
+        let role = NodeRole::An;
+        let token = generate_token(node_id, role.clone(), 60).unwrap();
+        let token_data = verify_token(&token).unwrap();
+
+        assert_eq!(token_data.claims.sub, node_id);
+        assert_eq!(token_data.claims.role, role);
+
+        restore_env("RUN_ENV", original_run_env);
+        restore_env("JWT_SECRET_KEY", original_secret);
+        restore_env("JWT_SECRET_KEY_FILE", original_secret_file);
+    }
+
+    #[test]
+    fn test_generate_and_verify_token_file_override() {
+        let _guard = TEST_ENV_GUARD.lock().unwrap();
+        let original_run_env = std::env::var("RUN_ENV").ok();
+        let original_secret = std::env::var("JWT_SECRET_KEY").ok();
+        let original_secret_file = std::env::var("JWT_SECRET_KEY_FILE").ok();
+
+        clear_secret_overrides();
+        std::env::remove_var("RUN_ENV");
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("anki_jwt_secret_{}", std::process::id()));
+        fs::write(&path, "file_secret_key").unwrap();
+        std::env::set_var("JWT_SECRET_KEY_FILE", &path);
+
+        let node_id = "file_node";
+        let role = NodeRole::An;
+        let token = generate_token(node_id, role.clone(), 60).unwrap();
+        let token_data = verify_token(&token).unwrap();
+
+        assert_eq!(token_data.claims.sub, node_id);
+        assert_eq!(token_data.claims.role, role);
+
+        fs::remove_file(path).unwrap();
+
+        restore_env("RUN_ENV", original_run_env);
+        restore_env("JWT_SECRET_KEY", original_secret);
+        restore_env("JWT_SECRET_KEY_FILE", original_secret_file);
     }
 
     #[test]
@@ -268,12 +365,23 @@ mod tests {
 
     #[test]
     fn test_renew_token() {
+        let _guard = TEST_ENV_GUARD.lock().unwrap();
+        let original_run_env = std::env::var("RUN_ENV").ok();
+        let original_secret = std::env::var("JWT_SECRET_KEY").ok();
+        let original_secret_file = std::env::var("JWT_SECRET_KEY_FILE").ok();
+
         std::env::set_var("JWT_SECRET_KEY", "test_secret_key");
+        std::env::remove_var("RUN_ENV");
+        std::env::remove_var("JWT_SECRET_KEY_FILE");
+
         let token = generate_token("node", NodeRole::Ki, 1).unwrap();
         let renewed = renew_token(&token, 60).unwrap();
         let data = verify_token(&renewed).unwrap();
         assert_eq!(data.claims.sub, "node");
-        std::env::remove_var("JWT_SECRET_KEY");
+
+        restore_env("RUN_ENV", original_run_env);
+        restore_env("JWT_SECRET_KEY", original_secret);
+        restore_env("JWT_SECRET_KEY_FILE", original_secret_file);
     }
 
     #[test]
