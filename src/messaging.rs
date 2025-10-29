@@ -82,6 +82,7 @@ pub async fn connect_with_retries(
     consumer_tag: &str,
     max_retries: u32,
     backoff_ms: u64,
+    max_delay_ms: u64,
 ) -> Result<(Channel, lapin::Consumer), Box<dyn Error>> {
     let mut attempts = 0u32;
     loop {
@@ -105,7 +106,11 @@ pub async fn connect_with_retries(
                     error!("Exceeded maximum reconnection attempts.");
                     return Err(e);
                 }
-                let delay = backoff_ms * 2u64.pow(attempts - 1);
+                let attempt_factor = attempts.saturating_sub(1);
+                let multiplier = 2u64.saturating_pow(attempt_factor);
+                let delay = backoff_ms
+                    .saturating_mul(multiplier)
+                    .min(max_delay_ms);
                 sleep(Duration::from_millis(delay)).await;
             }
         }
@@ -165,14 +170,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_with_retries_failure() {
-        let result = connect_with_retries("amqp://invalid:5672/%2f", "queue", "tag", 3, 10).await;
+        let result = connect_with_retries("amqp://invalid:5672/%2f", "queue", "tag", 3, 10, 20)
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_connect_with_retries_hits_max_delay_without_panic() {
+        let result = connect_with_retries("amqp://invalid:5672/%2f", "queue", "tag", 5, 4, 8)
+            .await;
         assert!(result.is_err());
     }
 
     #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_connect_with_retries_success() {
-        let res = connect_with_retries(AMQP_ADDR, "test_queue_retry", "test_tag", 1, 10).await;
+        let res =
+            connect_with_retries(AMQP_ADDR, "test_queue_retry", "test_tag", 1, 10, 10_000).await;
         match res {
             Ok((channel, consumer)) => {
                 // drop consumer to close
