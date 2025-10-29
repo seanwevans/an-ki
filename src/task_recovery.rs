@@ -80,32 +80,39 @@ ON CONFLICT (task_id) DO UPDATE SET task_type=$2, data=$3",
     /// # Parameters
     /// * `task_id` - Identifier of the task to remove.
     pub async fn remove_task(&self, task_id: &Uuid) -> Result<bool, AnKiError> {
-        let mut tasks = self.tasks.write().await;
-        let existed = tasks.remove(task_id).is_some();
-        drop(tasks);
+        let removed_task = {
+            let mut tasks = self.tasks.write().await;
+            tasks.remove(task_id)
+        };
 
-        if !existed {
-            debug!("Task not found for removal: {}", task_id);
-            return Ok(false);
-        }
+        let task = match removed_task {
+            Some(task) => task,
+            None => {
+                debug!("Task not found for removal: {}", task_id);
+                return Ok(false);
+            }
+        };
 
         info!("Removed task from recovery manager: {}", task_id);
-        let conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| {
+        let conn = match self.pool.get().await {
+            Ok(conn) => conn,
+            Err(e) => {
                 error!("Failed to acquire connection: {:?}", e);
-                AnKiError::TaskRecovery(e.to_string())
-            })?;
+                let mut tasks = self.tasks.write().await;
+                tasks.insert(task.task_id, task.clone());
+                return Err(AnKiError::TaskRecovery(e.to_string()));
+            }
+        };
 
-        conn
+        if let Err(e) = conn
             .execute("DELETE FROM tasks WHERE task_id = $1", &[task_id])
             .await
-            .map_err(|e| {
-                error!("Failed to remove task from database: {:?}", e);
-                AnKiError::TaskRecovery(e.to_string())
-            })?;
+        {
+            error!("Failed to remove task from database: {:?}", e);
+            let mut tasks = self.tasks.write().await;
+            tasks.insert(task.task_id, task);
+            return Err(AnKiError::TaskRecovery(e.to_string()));
+        }
 
         Ok(true)
     }
@@ -156,8 +163,8 @@ mod tests {
     use bb8::Pool;
     use bb8_postgres::PostgresConnectionManager;
     use std::str::FromStr;
-    use tokio::time::{timeout, Duration};
     use tokio::task::yield_now;
+    use tokio::time::{timeout, Duration};
     use tokio_postgres::{Config, NoTls};
 
     #[tokio::test]
