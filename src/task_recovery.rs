@@ -79,30 +79,42 @@ ON CONFLICT (task_id) DO UPDATE SET task_type=$2, data=$3",
     ///
     /// # Parameters
     /// * `task_id` - Identifier of the task to remove.
-    pub async fn remove_task(&self, task_id: &Uuid) -> bool {
-        let mut tasks = self.tasks.write().await;
-        let existed = tasks.remove(task_id).is_some();
-        drop(tasks);
+    pub async fn remove_task(&self, task_id: &Uuid) -> Result<bool, AnKiError> {
+        let removed_task = {
+            let mut tasks = self.tasks.write().await;
+            tasks.remove(task_id)
+        };
 
-        if !existed {
-            debug!("Task not found for removal: {}", task_id);
-            return false;
-        }
+        let task = match removed_task {
+            Some(task) => task,
+            None => {
+                debug!("Task not found for removal: {}", task_id);
+                return Ok(false);
+            }
+        };
 
         info!("Removed task from recovery manager: {}", task_id);
-        match self.pool.get().await {
-            Ok(conn) => {
-                if let Err(e) = conn
-                    .execute("DELETE FROM tasks WHERE task_id = $1", &[task_id])
-                    .await
-                {
-                    error!("Failed to remove task from database: {:?}", e);
-                }
+        let conn = match self.pool.get().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                error!("Failed to acquire connection: {:?}", e);
+                let mut tasks = self.tasks.write().await;
+                tasks.insert(task.task_id, task.clone());
+                return Err(AnKiError::TaskRecovery(e.to_string()));
             }
-            Err(e) => error!("Failed to acquire connection: {:?}", e),
+        };
+
+        if let Err(e) = conn
+            .execute("DELETE FROM tasks WHERE task_id = $1", &[task_id])
+            .await
+        {
+            error!("Failed to remove task from database: {:?}", e);
+            let mut tasks = self.tasks.write().await;
+            tasks.insert(task.task_id, task);
+            return Err(AnKiError::TaskRecovery(e.to_string()));
         }
 
-        true
+        Ok(true)
     }
 
     pub async fn recover_tasks(&self) -> Result<(), AnKiError> {
@@ -151,8 +163,8 @@ mod tests {
     use bb8::Pool;
     use bb8_postgres::PostgresConnectionManager;
     use std::str::FromStr;
-    use tokio::time::{timeout, Duration};
     use tokio::task::yield_now;
+    use tokio::time::{timeout, Duration};
     use tokio_postgres::{Config, NoTls};
 
     #[tokio::test]
@@ -167,7 +179,7 @@ mod tests {
         };
 
         recovery_manager.add_task(task.clone()).await.unwrap();
-        recovery_manager.remove_task(&task.task_id).await;
+        assert!(recovery_manager.remove_task(&task.task_id).await.unwrap());
 
         // Recover tasks from database
         recovery_manager.add_task(task.clone()).await.unwrap();
