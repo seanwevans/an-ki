@@ -105,15 +105,7 @@ impl LoadBalancer {
     /// * `Some(Uuid)` - Identifier of the chosen node.
     /// * `None` - No nodes were available for assignment.
     pub async fn assign_task(&self) -> Option<Uuid> {
-        let max_iterations = self.nodes.read().await.len().max(1);
-        let mut attempts = 0;
         loop {
-            if attempts >= max_iterations {
-                warn!("assign_task iteration limit reached: {}", max_iterations);
-                return None;
-            }
-            attempts += 1;
-
             let candidate = {
                 let mut heap = self.heap.write().await;
                 heap.pop()
@@ -138,13 +130,14 @@ impl LoadBalancer {
                         drop(nodes);
                         let mut heap = self.heap.write().await;
                         heap.push(updated);
+                        continue;
                     }
                 } else {
                     warn!("Stale heap entry for node: {}", node_info.node_id);
                 }
                 // Node might have been removed; continue loop
             } else {
-                error!("No nodes available to assign task.");
+                warn!("No nodes available to assign task.");
                 return None;
             }
         }
@@ -232,8 +225,8 @@ pub async fn monitor_node_load(
 mod tests {
     use super::*;
     use std::collections::HashSet;
-    use tokio::time::{timeout, Duration};
     use tokio::task::yield_now;
+    use tokio::time::{timeout, Duration};
 
     #[tokio::test]
     async fn test_assign_task_chooses_least_loaded() {
@@ -412,6 +405,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_assign_task_skips_multiple_stale_entries() {
+        let lb = LoadBalancer::new();
+        let valid_node = Uuid::new_v4();
+        let stale_node = Uuid::new_v4();
+
+        lb.add_node(valid_node).await;
+        lb.add_node(stale_node).await;
+
+        let valid_entry = {
+            let mut nodes = lb.nodes.write().await;
+            if let Some(info) = nodes.get_mut(&valid_node) {
+                info.task_count = 2;
+            }
+            let entry = nodes.get(&valid_node).cloned().unwrap();
+            nodes.remove(&stale_node);
+            entry
+        };
+
+        {
+            let mut heap = lb.heap.write().await;
+            heap.clear();
+            heap.push(NodeLoadInfo {
+                node_id: stale_node,
+                task_count: 0,
+            });
+            heap.push(NodeLoadInfo {
+                node_id: stale_node,
+                task_count: 1,
+            });
+            heap.push(valid_entry.clone());
+        }
+
+        let assigned = lb.assign_task().await;
+        assert_eq!(assigned, Some(valid_node));
+
+        let nodes = lb.nodes.read().await;
+        let count = nodes.get(&valid_node).unwrap().task_count;
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
     async fn test_monitor_node_load_updates() {
         let lb = LoadBalancer::new();
         let node = Uuid::new_v4();
@@ -430,14 +464,7 @@ mod tests {
         // Wait until the update is processed
         timeout(Duration::from_secs(1), async {
             loop {
-                if lb
-                    .nodes
-                    .read()
-                    .await
-                    .get(&node)
-                    .map(|n| n.task_count)
-                    == Some(4)
-                {
+                if lb.nodes.read().await.get(&node).map(|n| n.task_count) == Some(4) {
                     break;
                 }
                 yield_now().await;
