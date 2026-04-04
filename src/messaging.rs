@@ -1,10 +1,12 @@
 // messaging.rs: Implements RabbitMQ messaging logic, including sending and receiving messages across the network.
 
-use lapin::{options::*, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties};
+use crate::error::AnKiError;
+use lapin::{
+    options::*, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties,
+};
 use std::error::Error;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};
-use crate::error::AnKiError;
 
 pub async fn establish_connection(amqp_addr: &str) -> Result<Channel, AnKiError> {
     let connection = Connection::connect(amqp_addr, ConnectionProperties::default())
@@ -37,7 +39,11 @@ pub async fn declare_queue(channel: &Channel, queue_name: &str) -> Result<(), An
     Ok(())
 }
 
-pub async fn publish_message(channel: &Channel, queue_name: &str, payload: &[u8]) -> Result<(), AnKiError> {
+pub async fn publish_message(
+    channel: &Channel,
+    queue_name: &str,
+    payload: &[u8],
+) -> Result<(), AnKiError> {
     channel
         .basic_publish(
             "",
@@ -84,8 +90,13 @@ pub async fn connect_with_retries(
     backoff_ms: u64,
     max_delay_ms: u64,
 ) -> Result<(Channel, lapin::Consumer), Box<dyn Error>> {
-    let mut attempts = 0u32;
-    loop {
+    if max_retries == 0 {
+        return Err(Box::new(AnKiError::Messaging(
+            "AMQP reconnect attempts must be >= 1".to_string(),
+        )));
+    }
+
+    for attempt in 1..=max_retries {
         let result = async {
             let channel = establish_connection(amqp_addr).await?;
             declare_queue(&channel, queue_name).await?;
@@ -97,24 +108,35 @@ pub async fn connect_with_retries(
         match result {
             Ok(res) => return Ok(res),
             Err(e) => {
-                attempts += 1;
                 error!(
-                    "Failed to establish connection: {:?}. Attempt {}/{}",
-                    e, attempts, max_retries
+                    "Failed to establish AMQP connection for queue '{}' (attempt {}/{}): {:?}",
+                    queue_name, attempt, max_retries, e
                 );
-                if attempts >= max_retries {
-                    error!("Exceeded maximum reconnection attempts.");
+                if attempt == max_retries {
+                    error!(
+                        "Exhausted AMQP connection attempts for queue '{}' after {} total attempt(s).",
+                        queue_name, max_retries
+                    );
                     return Err(e);
                 }
-                let attempt_factor = attempts.saturating_sub(1);
+                let attempt_factor = attempt.saturating_sub(1);
                 let multiplier = 2u64.saturating_pow(attempt_factor);
-                let delay = backoff_ms
-                    .saturating_mul(multiplier)
-                    .min(max_delay_ms);
+                let delay = backoff_ms.saturating_mul(multiplier).min(max_delay_ms);
+                info!(
+                    "Retrying AMQP connection for queue '{}' in {} ms (next attempt {}/{}).",
+                    queue_name,
+                    delay,
+                    attempt + 1,
+                    max_retries
+                );
                 sleep(Duration::from_millis(delay)).await;
             }
         }
     }
+
+    Err(Box::new(AnKiError::Messaging(
+        "AMQP connection retry loop exited unexpectedly".to_string(),
+    )))
 }
 
 #[cfg(test)]
@@ -170,15 +192,37 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_with_retries_failure() {
-        let result = connect_with_retries("amqp://invalid:5672/%2f", "queue", "tag", 3, 10, 20)
-            .await;
+        let result =
+            connect_with_retries("amqp://invalid:5672/%2f", "queue", "tag", 3, 10, 20).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_connect_with_retries_hits_max_delay_without_panic() {
-        let result = connect_with_retries("amqp://invalid:5672/%2f", "queue", "tag", 5, 4, 8)
-            .await;
+        let result = connect_with_retries("amqp://invalid:5672/%2f", "queue", "tag", 5, 4, 8).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_connect_with_retries_rejects_zero_attempts() {
+        let result =
+            connect_with_retries("amqp://127.0.0.1:1/%2f", "queue", "tag", 0, 10, 20).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be >= 1"));
+    }
+
+    #[tokio::test]
+    async fn test_connect_with_retries_one_attempt_has_no_retry_sleep() {
+        let start = std::time::Instant::now();
+        let result =
+            connect_with_retries("amqp://127.0.0.1:1/%2f", "queue", "tag", 1, 5_000, 5_000).await;
+        assert!(result.is_err());
+        assert!(start.elapsed() < Duration::from_millis(1_000));
+    }
+
+    #[tokio::test]
+    async fn test_connect_with_retries_high_attempt_count_still_fails_cleanly() {
+        let result = connect_with_retries("amqp://127.0.0.1:1/%2f", "queue", "tag", 20, 0, 0).await;
         assert!(result.is_err());
     }
 

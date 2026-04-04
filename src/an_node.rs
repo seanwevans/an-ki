@@ -16,6 +16,21 @@ use tokio::sync::oneshot;
 use tracing::{error, info};
 use uuid::Uuid;
 
+fn normalized_reconnect_attempts() -> u32 {
+    let raw = std::env::var("AMQP_RECONNECT_ATTEMPTS")
+        .unwrap_or_else(|_| "5".into())
+        .parse()
+        .unwrap_or(5);
+    if raw == 0 {
+        error!(
+            "AMQP_RECONNECT_ATTEMPTS=0 is invalid for retry semantics; normalizing to 1 total attempt."
+        );
+        1
+    } else {
+        raw
+    }
+}
+
 #[derive(Default)]
 pub struct AnNodeState {
     model_params: Vec<f32>,
@@ -113,10 +128,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let shard_count = settings.model_shards;
     let mut state = AnNodeState::new();
 
-    let max_retries: u32 = std::env::var("AMQP_RECONNECT_ATTEMPTS")
-        .unwrap_or_else(|_| "5".into())
-        .parse()
-        .unwrap_or(5);
+    let max_retries: u32 = normalized_reconnect_attempts();
     let backoff_ms: u64 = std::env::var("AMQP_RECONNECT_BACKOFF_MS")
         .unwrap_or_else(|_| "500".into())
         .parse()
@@ -194,6 +206,27 @@ mod tests {
     #[cfg(feature = "integration-tests")]
     use tokio::time::{timeout, Duration};
 
+    #[test]
+    fn test_normalized_reconnect_attempts_zero_is_one() {
+        std::env::set_var("AMQP_RECONNECT_ATTEMPTS", "0");
+        assert_eq!(normalized_reconnect_attempts(), 1);
+        std::env::remove_var("AMQP_RECONNECT_ATTEMPTS");
+    }
+
+    #[test]
+    fn test_normalized_reconnect_attempts_one_is_one() {
+        std::env::set_var("AMQP_RECONNECT_ATTEMPTS", "1");
+        assert_eq!(normalized_reconnect_attempts(), 1);
+        std::env::remove_var("AMQP_RECONNECT_ATTEMPTS");
+    }
+
+    #[test]
+    fn test_normalized_reconnect_attempts_high_value_is_preserved() {
+        std::env::set_var("AMQP_RECONNECT_ATTEMPTS", "100");
+        assert_eq!(normalized_reconnect_attempts(), 100);
+        std::env::remove_var("AMQP_RECONNECT_ATTEMPTS");
+    }
+
     #[tokio::test]
     async fn test_process_task_ok() {
         let task = Task {
@@ -225,8 +258,8 @@ mod tests {
             10,
             10_000,
         )
-                .await
-                .expect("setup");
+        .await
+        .expect("setup");
 
         messaging::publish_message(&channel, "test_queue", b"hello")
             .await
