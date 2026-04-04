@@ -30,6 +30,20 @@ struct UpdateRequest {
     content: UpdateContent,
 }
 
+fn decode_update_request(payload: &[u8]) -> Option<UpdateRequest> {
+    match serde_json::from_slice::<UpdateRequest>(payload) {
+        Ok(update_request) => Some(update_request),
+        Err(e) => {
+            error!(
+                "Failed to deserialize update request payload. error={:?}, payload={}",
+                e,
+                String::from_utf8_lossy(payload)
+            );
+            None
+        }
+    }
+}
+
 pub async fn run() -> Result<(), Box<dyn Error>> {
     #[cfg(unix)]
     if let Err(e) = signals::setup_unix_signal_handlers().await {
@@ -86,10 +100,20 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             delivery_result = consumer.next() => {
                 match delivery_result {
                     Some(Ok(delivery)) => {
-                        let update_request: UpdateRequest = serde_json::from_slice(&delivery.data).map_err(|e| {
-                            error!("Failed to deserialize update request: {:?}", e);
-                            e
-                        })?;
+                        let Some(update_request) = decode_update_request(&delivery.data) else {
+                            // Queue policy: acknowledge malformed payloads so poison messages are dropped.
+                            delivery
+                                .ack(BasicAckOptions::default())
+                                .await
+                                .map_err(|e| {
+                                    error!(
+                                        "Failed to acknowledge malformed message for drop: {:?}",
+                                        e
+                                    );
+                                    e
+                                })?;
+                            continue;
+                        };
 
                         info!("Received update request: {:?}", update_request);
 
@@ -106,7 +130,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                             })?;
                     }
                     Some(Err(e)) => {
-                        error!("Failed to receive delivery: {:?}", e);
+                        error!("Failed to receive delivery (unrecoverable): {:?}", e);
+                        return Err(Box::new(e));
                     }
                     None => break,
                 }
@@ -223,5 +248,21 @@ mod tests {
         };
 
         assert!(process_update_request(update).await.is_err());
+    }
+
+    #[test]
+    fn decode_update_request_invalid_payload_does_not_block_following_payload() {
+        let invalid_payload = br#"{"update_id": "broken", "content": {"type":"database","data":{"statement":"X"}}"#;
+        let valid_payload =
+            br#"{"update_id":"5","content":{"type":"database","data":{"statement":"UPDATE t SET v=2"}}}"#;
+
+        let first = decode_update_request(invalid_payload);
+        let second = decode_update_request(valid_payload);
+
+        assert!(first.is_none(), "invalid payload should be dropped");
+        assert!(
+            second.is_some(),
+            "subsequent valid payload should still be decodable"
+        );
     }
 }
