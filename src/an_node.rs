@@ -1,6 +1,7 @@
 // an_node.rs: Contains the logic for An nodes, including task distribution to Ki nodes and local database handling.
 
 use std::error::Error;
+use std::io::{Error as IoError, ErrorKind};
 
 use crate::{
     common::{Task, TaskType},
@@ -36,6 +37,28 @@ impl AnNodeState {
         match task.task_type {
             TaskType::GradientUpdate => {
                 let gradient: Vec<f32> = serde_json::from_str(&task.data)?;
+                if !self.grad_accum.0.is_empty() && self.grad_accum.0.len() != gradient.len() {
+                    return Err(IoError::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "Gradient length mismatch for accumulator: expected {}, received {}",
+                            self.grad_accum.0.len(),
+                            gradient.len()
+                        ),
+                    )
+                    .into());
+                }
+                if !self.model_params.is_empty() && self.model_params.len() != gradient.len() {
+                    return Err(IoError::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "Gradient length mismatch for model parameters: expected {}, received {}",
+                            self.model_params.len(),
+                            gradient.len()
+                        ),
+                    )
+                    .into());
+                }
                 let broadcast_data = {
                     if self.grad_accum.0.is_empty() {
                         self.grad_accum.0 = vec![0.0; gradient.len()];
@@ -195,7 +218,7 @@ mod tests {
     use tokio::time::{timeout, Duration};
 
     #[tokio::test]
-    async fn test_process_task_ok() {
+    async fn test_first_gradient_initializes_state() {
         let task = Task {
             task_id: Uuid::new_v4(),
             task_type: TaskType::GradientUpdate,
@@ -203,6 +226,48 @@ mod tests {
         };
         let mut state = AnNodeState::new();
         assert!(state.process_task(task, None, 1).await.is_ok());
+        assert_eq!(state.model_params, vec![-0.1_f32, -0.2_f32]);
+        assert_eq!(state.grad_accum.0, vec![0.0_f32, 0.0_f32]);
+        assert_eq!(state.grad_accum.1, 0);
+    }
+
+    #[tokio::test]
+    async fn test_matching_lengths_succeed() {
+        let mut state = AnNodeState {
+            model_params: vec![1.0_f32, 2.0_f32],
+            grad_accum: (vec![0.0_f32, 0.0_f32], 0),
+        };
+        let task = Task {
+            task_id: Uuid::new_v4(),
+            task_type: TaskType::GradientUpdate,
+            data: serde_json::to_string(&vec![0.5_f32, 1.5_f32]).unwrap(),
+        };
+
+        assert!(state.process_task(task, None, 1).await.is_ok());
+        assert_eq!(state.model_params, vec![0.5_f32, 0.5_f32]);
+        assert_eq!(state.grad_accum.0, vec![0.0_f32, 0.0_f32]);
+        assert_eq!(state.grad_accum.1, 0);
+    }
+
+    #[tokio::test]
+    async fn test_mismatched_lengths_fail_without_mutation() {
+        let mut state = AnNodeState {
+            model_params: vec![1.0_f32, 2.0_f32],
+            grad_accum: (vec![0.1_f32, 0.2_f32], 1),
+        };
+        let original_model = state.model_params.clone();
+        let original_accum = state.grad_accum.clone();
+        let task = Task {
+            task_id: Uuid::new_v4(),
+            task_type: TaskType::GradientUpdate,
+            data: serde_json::to_string(&vec![0.3_f32, 0.4_f32, 0.5_f32]).unwrap(),
+        };
+
+        let err = state.process_task(task, None, 1).await.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("expected 2, received 3"));
+        assert_eq!(state.model_params, original_model);
+        assert_eq!(state.grad_accum, original_accum);
     }
 
     #[cfg(feature = "integration-tests")]
