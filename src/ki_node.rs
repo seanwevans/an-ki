@@ -6,7 +6,10 @@ use crate::config::load_settings;
 use crate::messaging;
 use crate::signals;
 use futures_util::stream::StreamExt;
-use lapin::{options::BasicAckOptions, Channel};
+use lapin::{
+    options::{BasicAckOptions, BasicNackOptions},
+    Channel,
+};
 use std::error::Error;
 use tokio::sync::oneshot;
 use tracing::{error, info};
@@ -32,6 +35,18 @@ impl KiNodeState {
     fn parameters(&self) -> &[f32] {
         &self.model_params
     }
+}
+
+fn deserialize_task_message(queue_name: &str, payload: &[u8]) -> Result<Task, serde_json::Error> {
+    serde_json::from_slice::<Task>(payload).map_err(|e| {
+        error!(
+            "Failed to deserialize task message from queue '{}' (payload_len={}): {:?}",
+            queue_name,
+            payload.len(),
+            e
+        );
+        e
+    })
 }
 
 #[cfg(feature = "tch")]
@@ -109,26 +124,31 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 delivery = consumer.next() => {
                     match delivery {
                         Some(Ok(delivery)) => {
-                            let task_message: Task = serde_json::from_slice(&delivery.data).map_err(|e| {
-                                error!("Failed to deserialize task message: {:?}", e);
-                                e
-                            })?;
+                            match deserialize_task_message(queue_name, &delivery.data) {
+                                Ok(task_message) => {
+                                    info!("Received task: {:?}", task_message);
 
-                            info!("Received task: {:?}", task_message);
+                                    match perform_computation(task_message).await {
+                                        Ok(result) => {
+                                            if let Err(e) = send_result(result, &channel).await {
+                                                error!("Failed to send result: {:?}", e);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!("Computation failed: {:?}", e);
+                                        }
+                                    }
 
-                            match perform_computation(task_message).await {
-                                Ok(result) => {
-                                    if let Err(e) = send_result(result, &channel).await {
-                                        error!("Failed to send result: {:?}", e);
+                                    if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
+                                        error!("Failed to acknowledge message: {:?}", e);
                                     }
                                 }
                                 Err(e) => {
-                                    error!("Computation failed: {:?}", e);
+                                    error!("Dropping malformed task message: {:?}", e);
+                                    if let Err(e) = delivery.nack(BasicNackOptions::default()).await {
+                                        error!("Failed to negatively acknowledge message: {:?}", e);
+                                    }
                                 }
-                            }
-
-                            if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
-                                error!("Failed to acknowledge message: {:?}", e);
                             }
                         }
                         Some(Err(e)) => {
@@ -286,6 +306,26 @@ mod tests {
         let result = perform_computation(task).await.unwrap();
         let mut state = AnNodeState::new();
         assert!(state.process_task(result, None, 1).await.is_ok());
+    }
+
+    #[test]
+    fn test_deserialize_task_message_ok() {
+        let task = Task {
+            task_id: uuid::Uuid::new_v4(),
+            task_type: TaskType::GradientUpdate,
+            data: serde_json::to_string(&vec![1.0_f32]).unwrap(),
+        };
+        let payload = serde_json::to_vec(&task).expect("serialize task");
+        let parsed = deserialize_task_message("ki_task_queue", &payload).expect("deserialize task");
+        assert_eq!(parsed.task_id, task.task_id);
+        assert_eq!(parsed.task_type, task.task_type);
+    }
+
+    #[test]
+    fn test_deserialize_task_message_malformed_payload() {
+        let err = deserialize_task_message("ki_task_queue", b"{not-json")
+            .expect_err("malformed payload should fail to deserialize");
+        assert!(err.is_syntax());
     }
 
     #[cfg(feature = "integration-tests")]
