@@ -2,7 +2,10 @@
 
 use crate::error::AnKiError;
 use lapin::{
-    options::*, types::FieldTable, BasicProperties, Channel, Connection, ConnectionProperties,
+    options::*,
+    publisher_confirm::{Confirmation, PublisherConfirm},
+    types::FieldTable,
+    BasicProperties, Channel, Connection, ConnectionProperties,
 };
 use std::error::Error;
 use tokio::time::{sleep, Duration};
@@ -19,6 +22,13 @@ pub async fn establish_connection(amqp_addr: &str) -> Result<Channel, AnKiError>
         error!("Failed to create channel: {:?}", e);
         AnKiError::Messaging(e.to_string())
     })?;
+    channel
+        .confirm_select(ConfirmSelectOptions::default())
+        .await
+        .map_err(|e| {
+            error!("Failed to enable publisher confirms: {:?}", e);
+            AnKiError::Messaging(e.to_string())
+        })?;
     info!("Established connection to RabbitMQ at: {}", amqp_addr);
     Ok(channel)
 }
@@ -44,7 +54,7 @@ pub async fn publish_message(
     queue_name: &str,
     payload: &[u8],
 ) -> Result<(), AnKiError> {
-    channel
+    let confirm: PublisherConfirm = channel
         .basic_publish(
             "",
             queue_name,
@@ -57,8 +67,28 @@ pub async fn publish_message(
             error!("Failed to publish message: {:?}", e);
             AnKiError::Messaging(e.to_string())
         })?;
-    info!("Published message to queue: {}", queue_name);
-    Ok(())
+
+    match confirm.await.map_err(|e| {
+        error!("Failed to confirm published message: {:?}", e);
+        AnKiError::Messaging(e.to_string())
+    })? {
+        Confirmation::Ack(_) => {
+            info!("Published message to queue: {}", queue_name);
+            Ok(())
+        }
+        Confirmation::Nack(_) => {
+            let msg = format!("RabbitMQ negatively acknowledged publish to queue: {queue_name}");
+            error!("{}", msg);
+            Err(AnKiError::Messaging(msg))
+        }
+        Confirmation::NotRequested => {
+            let msg = format!(
+                "RabbitMQ publisher confirms were not enabled for publish to queue: {queue_name}"
+            );
+            error!("{}", msg);
+            Err(AnKiError::Messaging(msg))
+        }
+    }
 }
 
 pub async fn consume_messages(
