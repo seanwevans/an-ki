@@ -17,6 +17,51 @@ use tokio::sync::oneshot;
 use tracing::{error, info};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryDisposition {
+    Ack,
+    Nack { requeue: bool },
+}
+
+fn nack_options(requeue: bool) -> BasicNackOptions {
+    BasicNackOptions {
+        multiple: false,
+        requeue,
+    }
+}
+
+fn is_invalid_payload_error(error: &(dyn Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(err) = current {
+        if err.is::<serde_json::Error>() {
+            return true;
+        }
+        if err
+            .downcast_ref::<IoError>()
+            .is_some_and(|io_error| io_error.kind() == ErrorKind::InvalidData)
+        {
+            return true;
+        }
+        current = err.source();
+    }
+    false
+}
+
+enum ProcessingOutcome<'a> {
+    Succeeded,
+    Failed(&'a (dyn Error + 'static)),
+}
+
+fn processing_disposition(outcome: ProcessingOutcome<'_>) -> DeliveryDisposition {
+    match outcome {
+        ProcessingOutcome::Succeeded => DeliveryDisposition::Ack,
+        ProcessingOutcome::Failed(error) if is_invalid_payload_error(error) => {
+            DeliveryDisposition::Nack { requeue: false }
+        }
+        ProcessingOutcome::Failed(_) => DeliveryDisposition::Nack { requeue: true },
+    }
+}
+
 fn normalized_reconnect_attempts() -> u32 {
     let raw = std::env::var("AMQP_RECONNECT_ATTEMPTS")
         .unwrap_or_else(|_| "5".into())
@@ -189,19 +234,53 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                             match serde_json::from_slice::<Task>(&delivery.data) {
                                 Ok(task_message) => {
                                     info!("Received task: {:?}", task_message);
-                                    if let Err(e) = state
+                                    match state
                                         .process_task(task_message, Some(&channel), shard_count)
                                         .await
                                     {
-                                        error!("Failed to process task: {:?}", e);
-                                    }
-                                    if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
-                                        error!("Failed to acknowledge message: {:?}", e);
+                                        Ok(()) => {
+                                            match processing_disposition(ProcessingOutcome::Succeeded) {
+                                                DeliveryDisposition::Ack => {
+                                                    if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
+                                                        error!("Failed to acknowledge message: {:?}", e);
+                                                    }
+                                                }
+                                                DeliveryDisposition::Nack { .. } => unreachable!(
+                                                    "successful processing must acknowledge messages"
+                                                ),
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let disposition = processing_disposition(ProcessingOutcome::Failed(e.as_ref()));
+                                            error!(
+                                                "Failed to process task; applying {:?}: {:?}",
+                                                disposition, e
+                                            );
+                                            match disposition {
+                                                DeliveryDisposition::Ack => unreachable!(
+                                                    "processing failures must not acknowledge messages"
+                                                ),
+                                                DeliveryDisposition::Nack { requeue } => {
+                                                    if let Err(nack_error) = delivery
+                                                        .nack(nack_options(requeue))
+                                                        .await
+                                                    {
+                                                        error!(
+                                                            "Failed to negatively acknowledge message: {:?}",
+                                                            nack_error
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 Err(e) => {
-                                    error!("Failed to deserialize task message: {:?}", e);
-                                    if let Err(e) = delivery.nack(BasicNackOptions::default()).await {
+                                    error!(
+                                        "Dropping malformed task message without requeue: {:?}",
+                                        e
+                                    );
+                                    if let Err(e) = delivery.nack(nack_options(false)).await {
                                         error!("Failed to negatively acknowledge message: {:?}", e);
                                     }
                                 }
@@ -226,6 +305,42 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::*;
     use crate::common::{Task, TaskType};
+    use std::io::{Error as IoError, ErrorKind};
+
+    #[test]
+    fn test_successful_processing_disposition_acknowledges() {
+        assert_eq!(
+            processing_disposition(ProcessingOutcome::Succeeded),
+            DeliveryDisposition::Ack
+        );
+    }
+
+    #[test]
+    fn test_invalid_payload_disposition_drops_without_requeue() {
+        let error = serde_json::from_str::<Vec<f32>>("not-json").unwrap_err();
+        assert_eq!(
+            processing_disposition(ProcessingOutcome::Failed(&error)),
+            DeliveryDisposition::Nack { requeue: false }
+        );
+    }
+
+    #[test]
+    fn test_invalid_data_disposition_drops_without_requeue() {
+        let error = IoError::new(ErrorKind::InvalidData, "mismatched gradient length");
+        assert_eq!(
+            processing_disposition(ProcessingOutcome::Failed(&error)),
+            DeliveryDisposition::Nack { requeue: false }
+        );
+    }
+
+    #[test]
+    fn test_transient_processing_disposition_requeues() {
+        let error = IoError::new(ErrorKind::TimedOut, "temporary broker timeout");
+        assert_eq!(
+            processing_disposition(ProcessingOutcome::Failed(&error)),
+            DeliveryDisposition::Nack { requeue: true }
+        );
+    }
     #[cfg(feature = "integration-tests")]
     use tokio::time::{timeout, Duration};
 

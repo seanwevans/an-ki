@@ -11,8 +11,54 @@ use lapin::{
     Channel,
 };
 use std::error::Error;
+use std::io::{Error as IoError, ErrorKind};
 use tokio::sync::oneshot;
 use tracing::{error, info};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryDisposition {
+    Ack,
+    Nack { requeue: bool },
+}
+
+fn nack_options(requeue: bool) -> BasicNackOptions {
+    BasicNackOptions {
+        multiple: false,
+        requeue,
+    }
+}
+
+fn is_invalid_payload_error(error: &(dyn Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(err) = current {
+        if err.is::<serde_json::Error>() {
+            return true;
+        }
+        if err
+            .downcast_ref::<IoError>()
+            .is_some_and(|io_error| io_error.kind() == ErrorKind::InvalidData)
+        {
+            return true;
+        }
+        current = err.source();
+    }
+    false
+}
+
+enum ProcessingOutcome<'a> {
+    Succeeded,
+    Failed(&'a (dyn Error + 'static)),
+}
+
+fn processing_disposition(outcome: ProcessingOutcome<'_>) -> DeliveryDisposition {
+    match outcome {
+        ProcessingOutcome::Succeeded => DeliveryDisposition::Ack,
+        ProcessingOutcome::Failed(error) if is_invalid_payload_error(error) => {
+            DeliveryDisposition::Nack { requeue: false }
+        }
+        ProcessingOutcome::Failed(_) => DeliveryDisposition::Nack { requeue: true },
+    }
+}
 
 fn normalized_reconnect_attempts() -> u32 {
     let raw = std::env::var("AMQP_RECONNECT_ATTEMPTS")
@@ -140,24 +186,50 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                 Ok(task_message) => {
                                     info!("Received task: {:?}", task_message);
 
-                                    match perform_computation(task_message).await {
-                                        Ok(result) => {
-                                            if let Err(e) = send_result(result, &channel).await {
-                                                error!("Failed to send result: {:?}", e);
+                                    match process_and_send_task(task_message, &channel).await {
+                                        Ok(()) => {
+                                            match processing_disposition(ProcessingOutcome::Succeeded) {
+                                                DeliveryDisposition::Ack => {
+                                                    if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
+                                                        error!("Failed to acknowledge message: {:?}", e);
+                                                    }
+                                                }
+                                                DeliveryDisposition::Nack { .. } => unreachable!(
+                                                    "successful processing must acknowledge messages"
+                                                ),
                                             }
                                         }
                                         Err(e) => {
-                                            error!("Computation failed: {:?}", e);
+                                            let disposition = processing_disposition(ProcessingOutcome::Failed(e.as_ref()));
+                                            error!(
+                                                "Failed to process task; applying {:?}: {:?}",
+                                                disposition, e
+                                            );
+                                            match disposition {
+                                                DeliveryDisposition::Ack => unreachable!(
+                                                    "processing failures must not acknowledge messages"
+                                                ),
+                                                DeliveryDisposition::Nack { requeue } => {
+                                                    if let Err(nack_error) = delivery
+                                                        .nack(nack_options(requeue))
+                                                        .await
+                                                    {
+                                                        error!(
+                                                            "Failed to negatively acknowledge message: {:?}",
+                                                            nack_error
+                                                        );
+                                                    }
+                                                }
+                                            }
                                         }
-                                    }
-
-                                    if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
-                                        error!("Failed to acknowledge message: {:?}", e);
                                     }
                                 }
                                 Err(e) => {
-                                    error!("Dropping malformed task message: {:?}", e);
-                                    if let Err(e) = delivery.nack(BasicNackOptions::default()).await {
+                                    error!(
+                                        "Dropping malformed task message without requeue: {:?}",
+                                        e
+                                    );
+                                    if let Err(e) = delivery.nack(nack_options(false)).await {
                                         error!("Failed to negatively acknowledge message: {:?}", e);
                                     }
                                 }
@@ -177,18 +249,37 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                     match model_delivery {
                         Some(Ok(delivery)) => {
                             match serde_json::from_slice::<Task>(&delivery.data) {
-                                Ok(task_message) => {
-                                    if let Err(e) = state.update_model(&task_message) {
-                                        error!("Failed to update model parameters: {:?}", e);
+                                Ok(task_message) => match state.update_model(&task_message) {
+                                    Ok(()) => {
+                                        if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
+                                            error!("Failed to acknowledge model update: {:?}", e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "Dropping invalid model update without requeue: {:?}",
+                                            e
+                                        );
+                                        if let Err(e) = delivery.nack(nack_options(false)).await {
+                                            error!(
+                                                "Failed to negatively acknowledge model update: {:?}",
+                                                e
+                                            );
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    error!(
+                                        "Dropping malformed model update without requeue: {:?}",
+                                        e
+                                    );
+                                    if let Err(e) = delivery.nack(nack_options(false)).await {
+                                        error!(
+                                            "Failed to negatively acknowledge model update: {:?}",
+                                            e
+                                        );
                                     }
                                 }
-                                Err(e) => {
-                                    error!("Failed to deserialize model update: {:?}", e);
-                                }
-                            }
-
-                            if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
-                                error!("Failed to acknowledge model update: {:?}", e);
                             }
                         }
                         Some(Err(e)) => {
@@ -204,6 +295,11 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+}
+
+async fn process_and_send_task(task: Task, channel: &Channel) -> Result<(), Box<dyn Error>> {
+    let result = perform_computation(task).await?;
+    send_result(result, channel).await
 }
 
 async fn perform_computation(task: Task) -> Result<Task, Box<dyn Error>> {
@@ -266,6 +362,33 @@ mod tests {
     #[cfg(not(feature = "tch"))]
     use crate::an_node::AnNodeState;
     use crate::common::{Task, TaskType};
+    use std::io::{Error as IoError, ErrorKind};
+
+    #[test]
+    fn test_successful_task_disposition_acknowledges() {
+        assert_eq!(
+            processing_disposition(ProcessingOutcome::Succeeded),
+            DeliveryDisposition::Ack
+        );
+    }
+
+    #[test]
+    fn test_invalid_task_payload_disposition_drops_without_requeue() {
+        let error = serde_json::from_str::<Vec<f32>>("not-json").unwrap_err();
+        assert_eq!(
+            processing_disposition(ProcessingOutcome::Failed(&error)),
+            DeliveryDisposition::Nack { requeue: false }
+        );
+    }
+
+    #[test]
+    fn test_send_result_failure_disposition_requeues_without_ack() {
+        let error = IoError::new(ErrorKind::ConnectionReset, "result publish failed");
+        assert_eq!(
+            processing_disposition(ProcessingOutcome::Failed(&error)),
+            DeliveryDisposition::Nack { requeue: true }
+        );
+    }
 
     #[test]
     fn test_normalized_reconnect_attempts_zero_is_one() {
