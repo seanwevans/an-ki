@@ -64,7 +64,7 @@ impl Scheduler {
                 })?;
             Ok(())
         } else {
-            error!("No available nodes to schedule task {}");
+            error!("No available nodes to schedule task {}", task.task_id);
             Err(AnKiError::Scheduler("No available nodes".into()))
         }
     }

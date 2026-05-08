@@ -16,6 +16,7 @@ mod logging_metrics;
 mod messaging;
 mod node_registry;
 mod principal;
+mod scheduler;
 mod security;
 mod signals;
 mod task_recovery;

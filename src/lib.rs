@@ -6,3 +6,4 @@ pub mod signals;
 pub mod load_balancer;
 pub mod task_recovery;
 pub mod error;
+pub mod scheduler;
