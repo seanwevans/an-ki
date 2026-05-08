@@ -55,16 +55,13 @@ impl Scheduler {
     pub async fn schedule_task(&self, task: Task) -> Result<(), AnKiError> {
         if let Some(node_id) = self.load_balancer.assign_task().await {
             info!("Scheduling task {} to node {}", task.task_id, node_id);
-            self.task_tx
-                .send(task)
-                .await
-                .map_err(|e| {
-                    error!("Failed to send task: {:?}", e);
-                    AnKiError::Scheduler(e.to_string())
-                })?;
+            self.task_tx.send(task).await.map_err(|e| {
+                error!("Failed to send task: {:?}", e);
+                AnKiError::Scheduler(e.to_string())
+            })?;
             Ok(())
         } else {
-            error!("No available nodes to schedule task {}");
+            error!("No available nodes to schedule task {}", task.task_id);
             Err(AnKiError::Scheduler("No available nodes".into()))
         }
     }
@@ -105,13 +102,10 @@ impl Scheduler {
                 "Broadcasting task {} to node {}",
                 task.task_id, info.node_id
             );
-            self.task_tx
-                .send(task.clone())
-                .await
-                .map_err(|e| {
-                    error!("Failed to send task: {:?}", e);
-                    AnKiError::Scheduler(e.to_string())
-                })?;
+            self.task_tx.send(task.clone()).await.map_err(|e| {
+                error!("Failed to send task: {:?}", e);
+                AnKiError::Scheduler(e.to_string())
+            })?;
         }
         Ok(())
     }

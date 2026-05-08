@@ -2,23 +2,12 @@
 
 use crate::logging_metrics;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use sled::Db;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{error, info};
 use uuid::Uuid;
-
-use async_trait::async_trait;
-use openraft::error::{InstallSnapshotError, RPCError, RaftError};
-use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
-use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
-    VoteRequest, VoteResponse,
-};
-use openraft::{BasicNode, Config, Raft};
-use openraft_memstore::{new_mem_store, ClientRequest, TypeConfig};
-use sled::Db;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConsensusProposal {
@@ -28,11 +17,13 @@ pub struct ConsensusProposal {
 }
 
 pub type NodeId = u64;
-/// Tracks proposals and votes in-memory.
+
+/// Tracks proposals, vote counts, and committed proposals in memory.
 #[derive(Default)]
 struct ConsensusState {
     proposals: RwLock<HashMap<Uuid, ConsensusProposal>>,
     votes: RwLock<HashMap<Uuid, usize>>,
+    committed: RwLock<HashSet<Uuid>>,
 }
 
 impl ConsensusState {
@@ -41,11 +32,15 @@ impl ConsensusState {
     }
 
     async fn add_proposal(&self, proposal: ConsensusProposal) {
-        self.votes.write().await.insert(proposal.proposal_id, 0);
+        self.votes
+            .write()
+            .await
+            .entry(proposal.proposal_id)
+            .or_insert(0);
         self.proposals
             .write()
             .await
-            .insert(proposal.proposal_id, proposal);
+            .insert(proposal.proposal_id, proposal.clone());
         info!("Received proposal: {}", proposal.proposal_id);
     }
 
@@ -66,57 +61,38 @@ impl ConsensusState {
         let votes = self.votes.read().await;
         matches!(votes.get(&proposal_id), Some(&count) if count >= threshold)
     }
-}
 
-struct DummyNetwork;
-
-#[async_trait]
-impl RaftNetwork<TypeConfig> for DummyNetwork {
-    async fn append_entries(
-        &mut self,
-        rpc: AppendEntriesRequest<TypeConfig>,
-        _opt: RPCOption,
-    ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig, RaftError<TypeConfig>>>
-    {
-        Ok(AppendEntriesResponse {
-            vote: rpc.vote,
-            success: true,
-            conflict: None,
-        })
+    async fn proposal(&self, proposal_id: Uuid) -> Option<ConsensusProposal> {
+        self.proposals.read().await.get(&proposal_id).cloned()
     }
 
-    async fn install_snapshot(
-        &mut self,
-        rpc: InstallSnapshotRequest<TypeConfig>,
-        _opt: RPCOption,
-    ) -> Result<
-        InstallSnapshotResponse<TypeConfig>,
-        RPCError<TypeConfig, RaftError<TypeConfig, InstallSnapshotError>>,
-    > {
-        Ok(InstallSnapshotResponse { vote: rpc.vote })
-    }
-
-    async fn vote(
-        &mut self,
-        rpc: VoteRequest<TypeConfig>,
-        _opt: RPCOption,
-    ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig, RaftError<TypeConfig>>> {
-        Ok(VoteResponse {
-            vote: rpc.vote,
-            vote_granted: true,
-        })
+    async fn mark_committed(&self, proposal_id: Uuid) -> bool {
+        self.committed.write().await.insert(proposal_id)
     }
 }
 
-struct DummyNetworkFactory;
+async fn commit_proposal(
+    state: &ConsensusState,
+    db: &Db,
+    commit_tx: &broadcast::Sender<String>,
+    proposal_id: Uuid,
+) -> Result<(), Box<dyn Error>> {
+    let Some(proposal) = state.proposal(proposal_id).await else {
+        error!("Cannot commit unknown proposal: {}", proposal_id);
+        return Ok(());
+    };
 
-#[async_trait]
-impl RaftNetworkFactory<TypeConfig> for DummyNetworkFactory {
-    type Network = DummyNetwork;
-
-    async fn new_client(&mut self, _target: NodeId, _node: &BasicNode) -> Self::Network {
-        DummyNetwork
+    if !state.mark_committed(proposal_id).await {
+        info!("Proposal {} was already committed", proposal_id);
+        return Ok(());
     }
+
+    db.insert(proposal_id.as_bytes(), serde_json::to_vec(&proposal)?)?;
+    db.flush_async().await?;
+    let _ = commit_tx.send(proposal.content.clone());
+    logging_metrics::set_consensus_state(1.0);
+    info!("Committed proposal {}", proposal_id);
+    Ok(())
 }
 
 pub async fn run_consensus_protocol(
@@ -127,40 +103,32 @@ pub async fn run_consensus_protocol(
     consensus_threshold: usize,
 ) -> Result<(), Box<dyn Error>> {
     let consensus_state = ConsensusState::new();
-
-    let config = Arc::new(Config::default().validate()?);
-    let (log_store, state_machine) = new_mem_store();
-    let network = DummyNetworkFactory;
-    let raft = Raft::new(node_id, config, network, log_store, state_machine).await?;
-    let db: Db = sled::open(format!("raft-{}", node_id))?;
+    let db: Db = sled::open(format!("consensus-{}", node_id))?;
+    let threshold = consensus_threshold.max(1);
 
     loop {
         tokio::select! {
             Some(proposal) = proposal_rx.recv() => {
-                consensus_state.add_proposal(proposal.clone()).await;
+                let proposal_id = proposal.proposal_id;
+                consensus_state.add_proposal(proposal).await;
 
-                let req = ClientRequest {
-                    client: proposal.proposer_id.to_string(),
-                    serial: 0,
-                    status: proposal.content.clone(),
-                };
-                match raft.client_write(req).await {
-                    Ok(res) => {
-                        let _ = db.insert(
-                            res.log_id.to_string().as_bytes(),
-                            serde_json::to_vec(&res.data)?,
-                        );
-                        let _ = commit_tx.send(res.data.0.clone().unwrap_or_default());
-                        info!("Committed proposal {}", proposal.proposal_id);
-                    }
-                    Err(e) => error!("raft write error: {:?}", e),
+                if threshold == 1 {
+                    commit_proposal(&consensus_state, &db, &commit_tx, proposal_id).await?;
                 }
             }
-            Ok(proposal_id) = vote_rx.recv() => {
-                consensus_state.cast_vote(proposal_id).await;
-                if consensus_state.has_consensus(proposal_id, consensus_threshold).await {
-                    info!("Consensus reached for proposal: {}", proposal_id);
-                    logging_metrics::set_consensus_state(1.0);
+            vote_result = vote_rx.recv() => {
+                match vote_result {
+                    Ok(proposal_id) => {
+                        consensus_state.cast_vote(proposal_id).await;
+                        if consensus_state.has_consensus(proposal_id, threshold).await {
+                            info!("Consensus reached for proposal: {}", proposal_id);
+                            commit_proposal(&consensus_state, &db, &commit_tx, proposal_id).await?;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        error!("Missed {} consensus vote messages", skipped);
+                    }
                 }
             }
             else => break,
