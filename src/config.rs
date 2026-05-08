@@ -44,7 +44,21 @@ impl Settings {
         override_from_env_or_file(&mut s, "database_url", "DATABASE_URL")?;
         override_from_env_or_file(&mut s, "otlp_endpoint", "OTLP_ENDPOINT")?;
 
-        s.try_into()
+        Self::from_config(s)
+    }
+
+    fn from_config(s: Config) -> Result<Self, ConfigError> {
+        let settings: Settings = s.try_into()?;
+        settings.validate()
+    }
+
+    fn validate(self) -> Result<Self, ConfigError> {
+        if self.model_shards == 0 {
+            return Err(ConfigError::Message(
+                "model_shards must be greater than 0".into(),
+            ));
+        }
+        Ok(self)
     }
 }
 
@@ -81,5 +95,30 @@ mod tests {
         assert!(settings.otlp_endpoint.is_some());
         assert!(settings.model_shards > 0);
         assert!(settings.training_epochs > 0);
+    }
+
+    #[test]
+    fn test_model_shards_zero_is_invalid() {
+        let mut config = Config::new();
+        config
+            .set("amqp_addr", "amqp://127.0.0.1:5672/%2f")
+            .unwrap();
+        config.set("jwt_secret_key", "test-secret").unwrap();
+        config
+            .set(
+                "database_url",
+                "postgresql://root@localhost:26257/defaultdb?sslmode=disable",
+            )
+            .unwrap();
+        config
+            .set("otlp_endpoint", "http://localhost:4317")
+            .unwrap();
+        config.set("model_shards", 0).unwrap();
+        config.set("training_epochs", 10).unwrap();
+
+        let err = Settings::from_config(config).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("model_shards must be greater than 0"));
     }
 }
