@@ -1,6 +1,6 @@
 // api.rs: Implements REST API endpoints for interacting with the task recovery system.
 
-use crate::common::{Task, TaskType};
+use crate::common::Task;
 use crate::task_recovery::TaskRecoveryManager;
 use std::sync::Arc;
 use tracing::error;
@@ -116,6 +116,7 @@ async fn delete_task_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::TaskType;
     use crate::database::get_pool;
     use warp::test::request;
 

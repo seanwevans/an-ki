@@ -1,12 +1,12 @@
 // health.rs: Implements health checks and a heartbeat mechanism for monitoring node health.
 
-use std::time::Duration;
-use tokio::time;
-use tokio::sync::broadcast;
-use tokio_util::sync::CancellationToken;
-use tracing::{info, error};
-use std::error::Error;
 use std::collections::HashMap;
+use std::error::Error;
+use std::time::Duration;
+use tokio::sync::broadcast;
+use tokio::time;
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info};
 
 #[derive(Clone, Debug)]
 pub struct HealthCheck {
@@ -47,7 +47,7 @@ pub async fn monitor_health(
     mut rx: broadcast::Receiver<HealthCheck>,
     unhealthy_threshold: u32,
     cancel: CancellationToken,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut unhealthy_counts: HashMap<String, u32> = HashMap::new();
 
     loop {
@@ -112,8 +112,8 @@ fn update_unhealthy_counts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::Duration;
     use std::collections::HashMap;
+    use tokio::time::Duration;
 
     #[tokio::test]
     async fn monitor_health_returns_on_channel_close() {
@@ -140,7 +140,9 @@ mod tests {
         let node_id = "test-node".to_string();
         let hb_cancel = cancel.clone();
 
-        let handle = tokio::spawn(async move { start_heartbeat(Duration::from_millis(10), tx, node_id, hb_cancel).await });
+        let handle = tokio::spawn(async move {
+            start_heartbeat(Duration::from_millis(10), tx, node_id, hb_cancel).await
+        });
 
         // Receive one heartbeat to ensure the task is running
         rx.recv().await.unwrap();
@@ -163,7 +165,10 @@ mod tests {
         // First unhealthy report for node A.
         let alert = update_unhealthy_counts(
             &mut counts,
-            &HealthCheck { node_id: node_a.clone(), is_healthy: false },
+            &HealthCheck {
+                node_id: node_a.clone(),
+                is_healthy: false,
+            },
             threshold,
         );
         assert!(!alert);
@@ -172,7 +177,10 @@ mod tests {
         // First unhealthy report for node B.
         let alert = update_unhealthy_counts(
             &mut counts,
-            &HealthCheck { node_id: node_b.clone(), is_healthy: false },
+            &HealthCheck {
+                node_id: node_b.clone(),
+                is_healthy: false,
+            },
             threshold,
         );
         assert!(!alert);
@@ -181,7 +189,10 @@ mod tests {
         // Second unhealthy report for node A should trigger the alert for node A only.
         let alert = update_unhealthy_counts(
             &mut counts,
-            &HealthCheck { node_id: node_a.clone(), is_healthy: false },
+            &HealthCheck {
+                node_id: node_a.clone(),
+                is_healthy: false,
+            },
             threshold,
         );
         assert!(alert);
@@ -191,7 +202,10 @@ mod tests {
         // Healthy report for node B should reset its counter without affecting node A.
         let alert = update_unhealthy_counts(
             &mut counts,
-            &HealthCheck { node_id: node_b.clone(), is_healthy: true },
+            &HealthCheck {
+                node_id: node_b.clone(),
+                is_healthy: true,
+            },
             threshold,
         );
         assert!(!alert);

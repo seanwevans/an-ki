@@ -1,7 +1,9 @@
 // backup.rs: Implements a backup mechanism for task persistence to enhance robustness and redundancy.
 
-use crate::common::{Task, TaskType};
+use crate::common::Task;
+use chrono::Utc;
 use std::collections::HashMap;
+use std::error::Error;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -11,8 +13,6 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tracing::info;
 use uuid::Uuid;
-use chrono::Utc;
-use std::error::Error;
 
 #[derive(Clone)]
 pub struct BackupManager {
@@ -63,6 +63,7 @@ impl BackupManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::TaskType;
     use std::fs;
 
     #[tokio::test]
@@ -75,7 +76,11 @@ mod tests {
             task_type: TaskType::ParameterPull,
             data: "Backup test task data".to_string(),
         };
-        backup_manager.tasks.write().await.insert(task.task_id, task.clone());
+        backup_manager
+            .tasks
+            .write()
+            .await
+            .insert(task.task_id, task.clone());
 
         // Create a backup
         backup_manager.create_backup().await.unwrap();
@@ -90,8 +95,15 @@ mod tests {
 
         // Clear the current tasks and restore from backup
         backup_manager.tasks.write().await.clear();
-        backup_manager.restore_backup(&backup_file_path).await.unwrap();
-        assert!(backup_manager.tasks.read().await.contains_key(&task.task_id));
+        backup_manager
+            .restore_backup(&backup_file_path)
+            .await
+            .unwrap();
+        assert!(backup_manager
+            .tasks
+            .read()
+            .await
+            .contains_key(&task.task_id));
 
         // Clean up backup files
         fs::remove_dir_all(backup_dir).unwrap();
