@@ -5,7 +5,11 @@ use crate::signals;
 
 use crate::config::load_settings;
 use futures_util::stream::StreamExt;
-use lapin::{options::BasicAckOptions, Channel, Connection, ConnectionProperties};
+use lapin::{
+    message::Delivery,
+    options::{BasicAckOptions, BasicNackOptions},
+    Channel, Connection, ConnectionProperties,
+};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tokio::sync::oneshot;
@@ -101,33 +105,29 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 match delivery_result {
                     Some(Ok(delivery)) => {
                         let Some(update_request) = decode_update_request(&delivery.data) else {
-                            // Queue policy: acknowledge malformed payloads so poison messages are dropped.
-                            delivery
-                                .ack(BasicAckOptions::default())
-                                .await
-                                .map_err(|e| {
-                                    error!(
-                                        "Failed to acknowledge malformed message for drop: {:?}",
-                                        e
-                                    );
-                                    e
-                                })?;
+                            // Queue policy: negatively acknowledge malformed payloads without
+                            // requeueing so the broker can dead-letter or drop poison messages.
+                            nack_for_dead_letter(&delivery).await?;
                             continue;
                         };
 
                         info!("Received update request: {:?}", update_request);
 
-                        if let Err(e) = process_update_request(update_request).await {
-                            error!("Failed to process update request: {:?}", e);
+                        match process_update_request(update_request).await {
+                            Ok(()) => {
+                                delivery
+                                    .ack(BasicAckOptions::default())
+                                    .await
+                                    .map_err(|e| {
+                                        error!("Failed to acknowledge successful update: {:?}", e);
+                                        e
+                                    })?;
+                            }
+                            Err(e) => {
+                                error!("Failed to process update request: {:?}", e);
+                                nack_for_dead_letter(&delivery).await?;
+                            }
                         }
-
-                        delivery
-                            .ack(BasicAckOptions::default())
-                            .await
-                            .map_err(|e| {
-                                error!("Failed to acknowledge message: {:?}", e);
-                                e
-                            })?;
                     }
                     Some(Err(e)) => {
                         error!("Failed to receive delivery (unrecoverable): {:?}", e);
@@ -153,37 +153,47 @@ async fn process_update_request(update: UpdateRequest) -> Result<(), Box<dyn Err
     info!("Processing update request with ID: {}", update.update_id);
 
     match update.content {
-        UpdateContent::Database { statement } => {
-            if statement.trim().is_empty() {
-                error!("Database update validation failed: empty statement");
-                return Err("Invalid database statement".into());
-            }
-            apply_database_update(&statement)?;
-            info!("Database update applied successfully");
-        }
-        UpdateContent::ConfigReload { key, value } => {
-            if key.trim().is_empty() {
-                error!("Config reload validation failed: empty key");
-                return Err("Invalid config key".into());
-            }
-            broadcast_config_reload(&key, &value)?;
-            info!("Configuration reload broadcast successfully");
-        }
+        UpdateContent::Database { statement } => reject_database_update(&statement),
+        UpdateContent::ConfigReload { key, value } => reject_config_reload(&key, &value),
+    }
+}
+
+async fn nack_for_dead_letter(delivery: &Delivery) -> Result<(), lapin::Error> {
+    delivery
+        .nack(BasicNackOptions {
+            multiple: false,
+            requeue: false,
+        })
+        .await
+        .map_err(|e| {
+            error!("Failed to negatively acknowledge failed update: {:?}", e);
+            e
+        })
+}
+
+fn reject_database_update(statement: &str) -> Result<(), Box<dyn Error>> {
+    if statement.trim().is_empty() {
+        error!("Database update validation failed: empty statement");
+        return Err("Invalid database statement".into());
     }
 
-    Ok(())
+    error!(
+        "Database update requests are unsupported until principal database execution is implemented"
+    );
+    Err("Database update requests are unsupported".into())
 }
 
-fn apply_database_update(statement: &str) -> Result<(), Box<dyn Error>> {
-    info!("Applying database statement: {}", statement);
-    // Placeholder for actual database interaction
-    Ok(())
-}
+fn reject_config_reload(key: &str, value: &str) -> Result<(), Box<dyn Error>> {
+    if key.trim().is_empty() {
+        error!("Config reload validation failed: empty key");
+        return Err("Invalid config key".into());
+    }
 
-fn broadcast_config_reload(key: &str, value: &str) -> Result<(), Box<dyn Error>> {
-    info!("Broadcasting config reload for {}={} ", key, value);
-    // Placeholder for broadcasting configuration changes to nodes
-    Ok(())
+    error!(
+        "Config reload request for {}={} is unsupported until node queue publication is implemented",
+        key, value
+    );
+    Err("Config reload requests are unsupported".into())
 }
 
 #[allow(dead_code)]
@@ -201,7 +211,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn process_update_request_database_success() {
+    async fn process_update_request_database_unsupported_is_not_successful() {
         let update = UpdateRequest {
             update_id: "1".into(),
             content: UpdateContent::Database {
@@ -209,7 +219,12 @@ mod tests {
             },
         };
 
-        assert!(process_update_request(update).await.is_ok());
+        let result = process_update_request(update).await;
+
+        assert!(
+            result.is_err(),
+            "unsupported database updates must not be reported as successful"
+        );
     }
 
     #[tokio::test]
@@ -225,7 +240,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_update_request_config_success() {
+    async fn process_update_request_config_unsupported_is_not_successful() {
         let update = UpdateRequest {
             update_id: "3".into(),
             content: UpdateContent::ConfigReload {
@@ -234,7 +249,12 @@ mod tests {
             },
         };
 
-        assert!(process_update_request(update).await.is_ok());
+        let result = process_update_request(update).await;
+
+        assert!(
+            result.is_err(),
+            "unsupported config reloads must not be reported as successful"
+        );
     }
 
     #[tokio::test]
@@ -252,7 +272,8 @@ mod tests {
 
     #[test]
     fn decode_update_request_invalid_payload_does_not_block_following_payload() {
-        let invalid_payload = br#"{"update_id": "broken", "content": {"type":"database","data":{"statement":"X"}}"#;
+        let invalid_payload =
+            br#"{"update_id": "broken", "content": {"type":"database","data":{"statement":"X"}}"#;
         let valid_payload =
             br#"{"update_id":"5","content":{"type":"database","data":{"statement":"UPDATE t SET v=2"}}}"#;
 
