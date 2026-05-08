@@ -1,6 +1,6 @@
 // api.rs: Implements REST API endpoints for interacting with the task recovery system.
 
-use crate::common::{Task, TaskType};
+use crate::common::Task;
 use crate::task_recovery::TaskRecoveryManager;
 use std::sync::Arc;
 use tracing::error;
@@ -111,6 +111,7 @@ async fn delete_task_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::TaskType;
     use crate::database::get_pool;
     use warp::test::request;
 
@@ -161,7 +162,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_task() {
         let pool = get_pool().await.expect("pool");
-        let task_manager = Arc::new(TaskRecoveryManager::new(pool));
+        let task_manager = Arc::new(TaskRecoveryManager::new(pool.clone()));
         let api = Api::new(task_manager.clone());
 
         let task = Task {
@@ -184,5 +185,50 @@ mod tests {
             .reply(&api.filters())
             .await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let database_only_task = Task {
+            task_id: Uuid::new_v4(),
+            task_type: TaskType::GradientUpdate,
+            data: "Database-only task data".to_string(),
+        };
+        let task_type = format!("{:?}", database_only_task.task_type);
+        pool.get()
+            .await
+            .unwrap()
+            .execute(
+                "INSERT INTO tasks (task_id, task_type, data) VALUES ($1, $2, $3)",
+                &[
+                    &database_only_task.task_id,
+                    &task_type,
+                    &database_only_task.data,
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(!task_manager
+            .tasks
+            .read()
+            .await
+            .contains_key(&database_only_task.task_id));
+
+        let res = request()
+            .method("DELETE")
+            .path(&format!("/tasks/{}", database_only_task.task_id))
+            .reply(&api.filters())
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let remaining_rows = pool
+            .get()
+            .await
+            .unwrap()
+            .query_one(
+                "SELECT COUNT(*) FROM tasks WHERE task_id = $1",
+                &[&database_only_task.task_id],
+            )
+            .await
+            .unwrap();
+        let remaining_count: i64 = remaining_rows.get(0);
+        assert_eq!(remaining_count, 0);
     }
 }

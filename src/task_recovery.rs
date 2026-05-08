@@ -85,36 +85,44 @@ ON CONFLICT (task_id) DO UPDATE SET task_type=$2, data=$3",
             tasks.remove(task_id)
         };
 
-        let task = match removed_task {
-            Some(task) => task,
-            None => {
-                debug!("Task not found for removal: {}", task_id);
-                return Ok(false);
-            }
-        };
+        if removed_task.is_some() {
+            info!("Removed task from recovery manager: {}", task_id);
+        } else {
+            debug!("Task not found in recovery manager cache: {}", task_id);
+        }
 
-        info!("Removed task from recovery manager: {}", task_id);
         let conn = match self.pool.get().await {
             Ok(conn) => conn,
             Err(e) => {
                 error!("Failed to acquire connection: {:?}", e);
-                let mut tasks = self.tasks.write().await;
-                tasks.insert(task.task_id, task.clone());
+                if let Some(task) = removed_task.as_ref() {
+                    let mut tasks = self.tasks.write().await;
+                    tasks.insert(task.task_id, task.clone());
+                }
                 return Err(AnKiError::TaskRecovery(e.to_string()));
             }
         };
 
-        if let Err(e) = conn
+        let deleted_rows = match conn
             .execute("DELETE FROM tasks WHERE task_id = $1", &[task_id])
             .await
         {
-            error!("Failed to remove task from database: {:?}", e);
-            let mut tasks = self.tasks.write().await;
-            tasks.insert(task.task_id, task);
-            return Err(AnKiError::TaskRecovery(e.to_string()));
+            Ok(count) => count,
+            Err(e) => {
+                error!("Failed to remove task from database: {:?}", e);
+                if let Some(task) = removed_task.as_ref() {
+                    let mut tasks = self.tasks.write().await;
+                    tasks.insert(task.task_id, task.clone());
+                }
+                return Err(AnKiError::TaskRecovery(e.to_string()));
+            }
+        };
+
+        if deleted_rows > 0 {
+            debug!("Removed persistent task from database: {}", task_id);
         }
 
-        Ok(true)
+        Ok(removed_task.is_some() || deleted_rows > 0)
     }
 
     pub async fn recover_tasks(&self) -> Result<(), AnKiError> {
