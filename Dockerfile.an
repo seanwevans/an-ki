@@ -11,5 +11,7 @@ RUN cargo build --release
 FROM debian:bookworm-slim
 WORKDIR /app
 COPY --from=builder /app/target/release/distributed_neural_network /usr/local/bin/an-ki
-COPY config/default.toml /config/default.toml
+RUN mkdir -p /app/config
+COPY config/default.toml /app/config/default.toml
+COPY config/default.example /app/config/default.example
 CMD ["an-ki", "an"]
