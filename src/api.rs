@@ -52,9 +52,8 @@ async fn get_task_handler(
     task_id: Uuid,
     task_manager: Arc<TaskRecoveryManager>,
 ) -> Result<impl warp::Reply, warp::Rejection> {
-    let tasks = task_manager.tasks.read().await;
-    if let Some(task) = tasks.get(&task_id) {
-        match serde_json::to_string(task) {
+    match task_manager.get_task(&task_id).await {
+        Ok(Some(task)) => match serde_json::to_string(&task) {
             Ok(body) => Ok(warp::reply::with_status(body, StatusCode::OK)),
             Err(e) => {
                 error!("Failed to serialize task: {}", e);
@@ -63,12 +62,18 @@ async fn get_task_handler(
                     StatusCode::INTERNAL_SERVER_ERROR,
                 ))
             }
-        }
-    } else {
-        Ok(warp::reply::with_status(
+        },
+        Ok(None) => Ok(warp::reply::with_status(
             "Task not found".to_string(),
             StatusCode::NOT_FOUND,
-        ))
+        )),
+        Err(e) => {
+            error!("Failed to get task: {:?}", e);
+            Ok(warp::reply::with_status(
+                "Internal server error".to_string(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ))
+        }
     }
 }
 
@@ -157,6 +162,45 @@ mod tests {
             .await;
         assert_eq!(res.status(), StatusCode::OK);
         assert!(task_manager.remove_task(&task.task_id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_get_task_from_database_on_cache_miss() {
+        let pool = get_pool().await.expect("pool");
+        let task_manager = Arc::new(TaskRecoveryManager::new(pool.clone()));
+        let api = Api::new(task_manager.clone());
+
+        let task = Task {
+            task_id: Uuid::new_v4(),
+            task_type: TaskType::GradientUpdate,
+            data: "Database-backed task".to_string(),
+        };
+        let task_type = format!("{:?}", task.task_type);
+
+        pool.get()
+            .await
+            .unwrap()
+            .execute(
+                "INSERT INTO tasks (task_id, task_type, data) VALUES ($1,$2,$3)",
+                &[&task.task_id, &task_type, &task.data],
+            )
+            .await
+            .unwrap();
+
+        let res = request()
+            .method("GET")
+            .path(&format!("/tasks/{}", task.task_id))
+            .reply(&api.filters())
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(task_manager.tasks.read().await.contains_key(&task.task_id));
+
+        pool.get()
+            .await
+            .unwrap()
+            .execute("DELETE FROM tasks WHERE task_id = $1", &[&task.task_id])
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

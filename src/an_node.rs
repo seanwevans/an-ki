@@ -49,6 +49,14 @@ impl AnNodeState {
         channel: Option<&Channel>,
         shard_count: usize,
     ) -> Result<(), Box<dyn Error>> {
+        if shard_count == 0 {
+            return Err(IoError::new(
+                ErrorKind::InvalidInput,
+                "shard_count must be greater than 0",
+            )
+            .into());
+        }
+
         match task.task_type {
             TaskType::GradientUpdate => {
                 let gradient: Vec<f32> = serde_json::from_str(&task.data)?;
@@ -299,6 +307,28 @@ mod tests {
         let err = state.process_task(task, None, 1).await.unwrap_err();
         let err_msg = err.to_string();
         assert!(err_msg.contains("expected 2, received 3"));
+        assert_eq!(state.model_params, original_model);
+        assert_eq!(state.grad_accum, original_accum);
+    }
+
+    #[tokio::test]
+    async fn test_zero_shard_count_fails_without_mutation() {
+        let mut state = AnNodeState {
+            model_params: vec![1.0_f32, 2.0_f32],
+            grad_accum: (vec![0.1_f32, 0.2_f32], 1),
+        };
+        let original_model = state.model_params.clone();
+        let original_accum = state.grad_accum.clone();
+        let task = Task {
+            task_id: Uuid::new_v4(),
+            task_type: TaskType::GradientUpdate,
+            data: serde_json::to_string(&vec![0.3_f32, 0.4_f32]).unwrap(),
+        };
+
+        let err = state.process_task(task, None, 0).await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("shard_count must be greater than 0"));
         assert_eq!(state.model_params, original_model);
         assert_eq!(state.grad_accum, original_accum);
     }

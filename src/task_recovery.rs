@@ -12,6 +12,17 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
+fn task_type_from_str(task_type: &str, task_id: &Uuid) -> Option<TaskType> {
+    match task_type {
+        "GradientUpdate" => Some(TaskType::GradientUpdate),
+        "ParameterPull" => Some(TaskType::ParameterPull),
+        other => {
+            error!("Unknown task_type '{}' for task {}", other, task_id);
+            None
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TaskRecoveryManager {
     /// In-memory cache of tasks keyed by ID.
@@ -75,6 +86,52 @@ ON CONFLICT (task_id) DO UPDATE SET task_type=$2, data=$3",
         Ok(())
     }
 
+    /// Looks up a task by ID, first checking memory and then falling back to the database.
+    ///
+    /// When the task is found in the database, the in-memory cache is repopulated
+    /// before returning a clone of the recovered task.
+    ///
+    /// # Parameters
+    /// * `task_id` - Identifier of the task to retrieve.
+    pub async fn get_task(&self, task_id: &Uuid) -> Result<Option<Task>, AnKiError> {
+        if let Some(task) = self.tasks.read().await.get(task_id).cloned() {
+            return Ok(Some(task));
+        }
+
+        let conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AnKiError::TaskRecovery(e.to_string()))?;
+        let row = conn
+            .query_opt(
+                "SELECT task_id, task_type, data FROM tasks WHERE task_id = $1",
+                &[task_id],
+            )
+            .await
+            .map_err(|e| AnKiError::TaskRecovery(e.to_string()))?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let task_id: Uuid = row.get("task_id");
+        let task_type_str: String = row.get("task_type");
+        let data: String = row.get("data");
+        let Some(task_type) = task_type_from_str(&task_type_str, &task_id) else {
+            return Ok(None);
+        };
+        let task = Task {
+            task_id,
+            task_type,
+            data,
+        };
+
+        self.tasks.write().await.insert(task.task_id, task.clone());
+
+        Ok(Some(task))
+    }
+
     /// Removes a task from both memory and the database.
     ///
     /// # Parameters
@@ -133,13 +190,8 @@ ON CONFLICT (task_id) DO UPDATE SET task_type=$2, data=$3",
             let task_id: Uuid = row.get("task_id");
             let task_type_str: String = row.get("task_type");
             let data: String = row.get("data");
-            let task_type = match task_type_str.as_str() {
-                "GradientUpdate" => TaskType::GradientUpdate,
-                "ParameterPull" => TaskType::ParameterPull,
-                other => {
-                    error!("Unknown task_type '{}' for task {}", other, task_id);
-                    continue;
-                }
+            let Some(task_type) = task_type_from_str(&task_type_str, &task_id) else {
+                continue;
             };
             tasks.insert(
                 task_id,
@@ -190,6 +242,55 @@ mod tests {
         assert_eq!(recovered.data, "Test data");
 
         // Clean up
+        pool.get()
+            .await
+            .unwrap()
+            .execute("DELETE FROM tasks WHERE task_id = $1", &[&task.task_id])
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_get_task_falls_back_to_database_and_repopulates_cache() {
+        let pool = get_pool().await.expect("pool");
+        let recovery_manager = TaskRecoveryManager::new(pool.clone());
+
+        let task = Task {
+            task_id: Uuid::new_v4(),
+            task_type: TaskType::GradientUpdate,
+            data: "Database-backed task".to_string(),
+        };
+        let task_type = format!("{:?}", task.task_type);
+
+        pool.get()
+            .await
+            .unwrap()
+            .execute(
+                "INSERT INTO tasks (task_id, task_type, data) VALUES ($1,$2,$3)",
+                &[&task.task_id, &task_type, &task.data],
+            )
+            .await
+            .unwrap();
+
+        assert!(!recovery_manager
+            .tasks
+            .read()
+            .await
+            .contains_key(&task.task_id));
+
+        let recovered = recovery_manager
+            .get_task(&task.task_id)
+            .await
+            .unwrap()
+            .expect("task missing");
+        assert_eq!(recovered.task_type, TaskType::GradientUpdate);
+        assert_eq!(recovered.data, task.data);
+        assert!(recovery_manager
+            .tasks
+            .read()
+            .await
+            .contains_key(&task.task_id));
+
         pool.get()
             .await
             .unwrap()

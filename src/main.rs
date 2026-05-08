@@ -3,7 +3,24 @@
 use std::env;
 use tracing::error;
 
-use distributed_neural_network::{an_node, ki_node, logging_metrics, principal};
+mod an_node;
+mod api;
+mod backup;
+mod common;
+mod config;
+mod database;
+mod dht;
+mod ki_node;
+mod load_balancer;
+mod logging_metrics;
+mod messaging;
+mod node_registry;
+mod principal;
+mod scheduler;
+mod security;
+mod signals;
+mod task_recovery;
+mod error;
 
 #[tokio::main]
 async fn main() {
