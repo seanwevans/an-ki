@@ -62,9 +62,15 @@ fn processing_disposition(outcome: ProcessingOutcome<'_>) -> DeliveryDisposition
 
 fn normalized_reconnect_attempts() -> u32 {
     let raw = std::env::var("AMQP_RECONNECT_ATTEMPTS")
-        .unwrap_or_else(|_| "5".into())
-        .parse()
+        .ok()
+        .and_then(|value| value.parse().ok())
         .unwrap_or(5);
+    normalize_reconnect_attempts(raw)
+}
+
+/// Ensures the configured retry count yields at least one attempt. A value of
+/// zero would otherwise mean "never try", which is never the intent.
+fn normalize_reconnect_attempts(raw: u32) -> u32 {
     if raw == 0 {
         error!(
             "AMQP_RECONNECT_ATTEMPTS=0 is invalid for retry semantics; normalizing to 1 total attempt."
@@ -391,24 +397,18 @@ mod tests {
     }
 
     #[test]
-    fn test_normalized_reconnect_attempts_zero_is_one() {
-        std::env::set_var("AMQP_RECONNECT_ATTEMPTS", "0");
-        assert_eq!(normalized_reconnect_attempts(), 1);
-        std::env::remove_var("AMQP_RECONNECT_ATTEMPTS");
+    fn zero_reconnect_attempts_normalizes_to_one() {
+        assert_eq!(normalize_reconnect_attempts(0), 1);
     }
 
     #[test]
-    fn test_normalized_reconnect_attempts_one_is_one() {
-        std::env::set_var("AMQP_RECONNECT_ATTEMPTS", "1");
-        assert_eq!(normalized_reconnect_attempts(), 1);
-        std::env::remove_var("AMQP_RECONNECT_ATTEMPTS");
+    fn one_reconnect_attempt_is_preserved() {
+        assert_eq!(normalize_reconnect_attempts(1), 1);
     }
 
     #[test]
-    fn test_normalized_reconnect_attempts_high_value_is_preserved() {
-        std::env::set_var("AMQP_RECONNECT_ATTEMPTS", "100");
-        assert_eq!(normalized_reconnect_attempts(), 100);
-        std::env::remove_var("AMQP_RECONNECT_ATTEMPTS");
+    fn high_reconnect_attempt_count_is_preserved() {
+        assert_eq!(normalize_reconnect_attempts(100), 100);
     }
 
     #[test]
