@@ -2,6 +2,7 @@
 
 use crate::health;
 use crate::messaging::{consume_messages, declare_queue};
+use crate::raft_node;
 use crate::signals;
 
 use crate::config::load_settings;
@@ -104,6 +105,21 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         Err(e) => error!("Failed to open health-monitor channel: {:?}", e),
     }
 
+    // Start the Raft consensus node. Today this is a single-member cluster that
+    // elects itself leader; multi-node operation arrives by replacing the
+    // networking stub in `raft_node` with a real transport.
+    let raft_id = raft_node::node_id_from_env();
+    let raft = match raft_node::start_single_node(raft_id).await {
+        Ok(raft) => {
+            info!("Raft consensus node started (id={})", raft_id);
+            Some(raft)
+        }
+        Err(e) => {
+            error!("Failed to start Raft consensus node: {:?}", e);
+            None
+        }
+    };
+
     info!("Principal node is running and waiting for update requests...");
 
     loop {
@@ -150,8 +166,13 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Stop the health monitor before tearing down the connection.
+    // Stop the health monitor and Raft node before tearing down the connection.
     health_cancel.cancel();
+    if let Some(raft) = raft {
+        if let Err(e) = raft.shutdown().await {
+            error!("Failed to shut down Raft node: {:?}", e);
+        }
+    }
 
     if let Err(e) = channel.close(200, "Bye").await {
         error!("Failed to close channel: {:?}", e);
