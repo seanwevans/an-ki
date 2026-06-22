@@ -1,10 +1,10 @@
 use clap::{Parser, Subcommand};
-use rcgen::{Certificate, CertificateParams, IsCa, BasicConstraints, ExtendedKeyUsagePurpose};
+use rcgen::{BasicConstraints, Certificate, CertificateParams, ExtendedKeyUsagePurpose, IsCa};
 use std::error::Error;
 use std::fs;
 
 #[derive(Parser)]
-#[command(name = "cert-tool", about = "Generate node certificates for AN-KI" )]
+#[command(name = "cert-tool", about = "Generate node certificates for AN-KI")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -44,7 +44,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             fs::write(cert, ca.serialize_pem()?)?;
             fs::write(key, ca.serialize_private_key_pem())?;
         }
-        Commands::GenerateNode { ca_cert, ca_key, node_id, cert, key } => {
+        Commands::GenerateNode {
+            ca_cert,
+            ca_key,
+            node_id,
+            cert,
+            key,
+        } => {
             let ca_cert_pem = fs::read_to_string(ca_cert)?;
             let ca_key_pem = fs::read_to_string(ca_key)?;
             let key_pair = rcgen::KeyPair::from_pem(&ca_key_pem)?;

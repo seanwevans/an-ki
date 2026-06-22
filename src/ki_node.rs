@@ -351,7 +351,7 @@ async fn send_result(result: Task, channel: &Channel) -> Result<(), Box<dyn Erro
 
     messaging::publish_message(channel, result_queue, &payload)
         .await
-        .map_err(|e| Box::<dyn Error>::from(e))?;
+        .map_err(Box::<dyn Error>::from)?;
     info!("Sent result for task ID: {}", result.task_id);
     Ok(())
 }

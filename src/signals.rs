@@ -1,7 +1,7 @@
 // signals.rs: Handles signal handling, including graceful shutdown and CTRL+C handling.
 
-use tokio::signal;
 use std::error::Error;
+use tokio::signal;
 use tracing::{error, info};
 
 use tokio::sync::oneshot;
@@ -96,11 +96,11 @@ pub async fn setup_unix_signal_handlers_with_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{timeout, Duration};
     #[cfg(unix)]
     use nix::sys::signal::{self, Signal};
     #[cfg(unix)]
     use nix::unistd::Pid;
+    use tokio::time::{timeout, Duration};
 
     #[cfg(unix)]
     #[tokio::test]
@@ -115,7 +115,10 @@ mod tests {
         ready_rx.await.unwrap();
         signal::kill(Pid::this(), Signal::SIGINT).unwrap();
 
-        timeout(Duration::from_secs(1), rx).await.expect("signal wait").unwrap();
+        timeout(Duration::from_secs(1), rx)
+            .await
+            .expect("signal wait")
+            .unwrap();
         handler.await.unwrap();
     }
 
@@ -124,7 +127,9 @@ mod tests {
     async fn test_setup_unix_signal_handlers() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        setup_unix_signal_handlers_with_tx(tx, ready_tx).await.unwrap();
+        setup_unix_signal_handlers_with_tx(tx, ready_tx)
+            .await
+            .unwrap();
 
         // Wait for handlers to be ready before sending signals
         ready_rx.await.unwrap();

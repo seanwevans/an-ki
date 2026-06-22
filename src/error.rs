@@ -17,4 +17,3 @@ pub enum AnKiError {
     #[error("Invalid ciphertext")]
     InvalidCiphertext,
 }
-

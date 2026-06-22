@@ -41,6 +41,7 @@ impl BackupManager {
         let mut file = OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&backup_file_path)
             .await?;
         file.write_all(content.as_bytes()).await?;

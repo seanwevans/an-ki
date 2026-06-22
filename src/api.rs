@@ -113,7 +113,10 @@ async fn delete_task_handler(
     }
 }
 
-#[cfg(test)]
+// Every test here drives the API through a real `TaskRecoveryManager` backed by
+// a live database connection, so they are gated behind the `integration-tests`
+// feature and excluded from the default `cargo test` run.
+#[cfg(all(test, feature = "integration-tests"))]
 mod tests {
     use super::*;
     use crate::common::TaskType;

@@ -3,30 +3,14 @@
 use std::env;
 use tracing::error;
 
-mod an_node;
-mod api;
-mod backup;
-mod common;
-mod config;
-mod database;
-mod dht;
-mod ki_node;
-mod load_balancer;
-mod logging_metrics;
-mod messaging;
-mod node_registry;
-mod principal;
-mod scheduler;
-mod security;
-mod signals;
-mod task_recovery;
-mod error;
+use distributed_neural_network::{an_node, ki_node, logging_metrics, principal};
 
 #[tokio::main]
 async fn main() {
     // Initialize tracing and metrics
     logging_metrics::init_logging();
-    let _ = tokio::spawn(logging_metrics::run_metrics_server());
+    // Spawn the metrics server as a detached background task.
+    tokio::spawn(logging_metrics::run_metrics_server());
 
     // Determine the node type based on an environment variable or command-line argument
     let args: Vec<String> = env::args().collect();

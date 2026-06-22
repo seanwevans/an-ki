@@ -4,6 +4,7 @@
 //! are currently connected. It is primarily used by higher level coordination
 //! components to ensure reliable communication between nodes.
 
+use crate::error::AnKiError;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -15,7 +16,6 @@ use tokio_rustls::{
     TlsConnector,
 };
 use tracing::{error, info};
-use crate::error::AnKiError;
 
 /// Manages outbound connections to other nodes and maintains a set of peers that
 /// are currently reachable.
@@ -63,8 +63,8 @@ impl NetworkManager {
     ) -> Result<(), AnKiError> {
         for attempt in 0..retry_count {
             let connector = TlsConnector::from(self.tls_config.clone());
-            let domain_name = ServerName::try_from(domain)
-                .map_err(|e| AnKiError::Network(e.to_string()))?;
+            let domain_name =
+                ServerName::try_from(domain).map_err(|e| AnKiError::Network(e.to_string()))?;
             let fut = async {
                 let tcp = TcpStream::connect(address)
                     .await
@@ -177,7 +177,7 @@ mod tests {
         let client_config = ClientConfig::builder()
             .with_safe_defaults()
             .with_root_certificates(root)
-            .with_single_cert(vec![client_cert], client_key)
+            .with_client_auth_cert(vec![client_cert], client_key)
             .unwrap();
 
         // server config with client auth

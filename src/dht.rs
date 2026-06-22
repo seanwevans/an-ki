@@ -12,6 +12,12 @@ pub struct Dht {
     nodes: Arc<RwLock<HashMap<Uuid, NodeInfo>>>,
 }
 
+impl Default for Dht {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Dht {
     pub fn new() -> Self {
         Dht {

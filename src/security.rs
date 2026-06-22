@@ -34,8 +34,7 @@ fn get_secret_key() -> Result<String, AnKiError> {
     }
 
     if let Ok(path) = env::var("JWT_SECRET_KEY_FILE") {
-        let secret = fs::read_to_string(&path)
-            .map_err(|e| AnKiError::Config(e.to_string()))?;
+        let secret = fs::read_to_string(&path).map_err(|e| AnKiError::Config(e.to_string()))?;
         return Ok(secret.trim().to_owned());
     }
 
@@ -165,12 +164,11 @@ pub fn decrypt_message(encoded_message: &str, key: &str) -> Result<String, AnKiE
 
 /// Validates `cert_der` against the provided CA certificate `ca_der`.
 pub fn validate_certificate(cert_der: &[u8], ca_der: &[u8]) -> Result<(), AnKiError> {
-    let anchor = TrustAnchor::try_from_cert_der(ca_der)
-        .map_err(|e| AnKiError::Security(e.to_string()))?;
+    let anchor =
+        TrustAnchor::try_from_cert_der(ca_der).map_err(|e| AnKiError::Security(e.to_string()))?;
     let anchors = [anchor];
     let trust_anchors = webpki::TlsServerTrustAnchors(&anchors);
-    let cert = EndEntityCert::try_from(cert_der)
-        .map_err(|e| AnKiError::Security(e.to_string()))?;
+    let cert = EndEntityCert::try_from(cert_der).map_err(|e| AnKiError::Security(e.to_string()))?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| AnKiError::Security(e.to_string()))?;
@@ -207,8 +205,7 @@ pub fn verify_challenge(
     signature: &[u8],
     cert_der: &[u8],
 ) -> Result<(), AnKiError> {
-    let cert = EndEntityCert::try_from(cert_der)
-        .map_err(|e| AnKiError::Security(e.to_string()))?;
+    let cert = EndEntityCert::try_from(cert_der).map_err(|e| AnKiError::Security(e.to_string()))?;
     cert.verify_signature(&ECDSA_P256_SHA256, challenge, signature)
         .map_err(|e| AnKiError::Security(e.to_string()))?;
     Ok(())
@@ -218,8 +215,8 @@ pub fn verify_challenge(
 mod tests {
     use super::{
         decrypt_message, encrypt_message, generate_challenge, generate_token, renew_token,
-        sign_challenge, validate_certificate, verify_challenge, verify_token, Claims,
-        NONCE_LEN, SALT_LEN,
+        sign_challenge, validate_certificate, verify_challenge, verify_token, Claims, NONCE_LEN,
+        SALT_LEN,
     };
     use crate::common::NodeRole;
     use crate::error::AnKiError;
