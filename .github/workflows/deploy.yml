@@ -41,4 +41,4 @@ jobs:
           push: false
           tags: an-ki:${{ matrix.node }}
           cache-from: type=gha,scope=an-ki-builder
-          cache-to: type=gha,mode=max,scope=an-ki-builder
+          cache-to: type=gha,mode=max,scope=an-ki-builder,ignore-error=true
