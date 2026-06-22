@@ -209,7 +209,7 @@ mod tests {
             threshold,
         );
         assert!(!alert);
-        assert!(counts.get(&node_b).is_none());
+        assert!(!counts.contains_key(&node_b));
         assert_eq!(counts.get(&node_a), Some(&2));
     }
 }

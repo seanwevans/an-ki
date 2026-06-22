@@ -15,6 +15,12 @@ pub struct NodeRegistry {
     nodes: Arc<RwLock<HashMap<Uuid, NodeInfo>>>,
 }
 
+impl Default for NodeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NodeRegistry {
     pub fn new() -> Self {
         NodeRegistry {

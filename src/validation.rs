@@ -1,10 +1,10 @@
 // validation.rs: Implements data validation logic for messages exchanged between nodes.
 
-use regex::Regex;
 use lazy_static::lazy_static;
+use regex::Regex;
+use std::error::Error;
 use tracing::{error, info};
 use uuid::Uuid;
-use std::error::Error;
 
 lazy_static! {
     static ref IP_REGEX: Regex = Regex::new(

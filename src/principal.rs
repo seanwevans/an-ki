@@ -16,12 +16,6 @@ use tokio::sync::oneshot;
 use tracing::{error, info};
 
 #[derive(Serialize, Deserialize, Debug)]
-struct RoleAssignment {
-    node_id: String,
-    role: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case", content = "data")]
 enum UpdateContent {
     Database { statement: String },
@@ -86,12 +80,12 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let queue_name = "principal_update_queue";
     declare_queue(&channel, queue_name)
         .await
-        .map_err(|e| Box::<dyn Error>::from(e))?;
+        .map_err(Box::<dyn Error>::from)?;
 
     // Start consuming update requests from the queue
     let mut consumer = consume_messages(&channel, queue_name, "principal_consumer")
         .await
-        .map_err(|e| Box::<dyn Error>::from(e))?;
+        .map_err(Box::<dyn Error>::from)?;
 
     info!("Principal node is running and waiting for update requests...");
 

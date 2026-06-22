@@ -215,7 +215,10 @@ ON CONFLICT (task_id) DO UPDATE SET task_type=$2, data=$3",
     }
 }
 
-#[cfg(test)]
+// These tests exercise persistence against a live database (via `get_pool`), so
+// they are gated behind the `integration-tests` feature and excluded from the
+// default `cargo test` run.
+#[cfg(all(test, feature = "integration-tests"))]
 mod tests {
     use super::*;
     use crate::config;

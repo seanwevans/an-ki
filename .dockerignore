@@ -1,0 +1,19 @@
+# Build artifacts (can be multiple GB) — never needed inside the image
+/target
+
+# Git metadata
+/.git
+.gitignore
+
+# Docs and CI not needed to build the binary
+*.md
+/.github
+
+# Deployment manifests (handled outside the image build)
+/helm
+
+# Editor/OS cruft
+**/*.rs.bk
+*.swp
+*.swo
+.DS_Store

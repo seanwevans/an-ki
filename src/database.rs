@@ -47,7 +47,10 @@ pub async fn get_pool() -> Result<PgPool, Box<dyn Error + Send + Sync>> {
     Ok(pool)
 }
 
-#[cfg(test)]
+// These tests require a live PostgreSQL/CockroachDB instance reachable via the
+// configured `database_url`, so they are gated behind the `integration-tests`
+// feature and excluded from the default `cargo test` run.
+#[cfg(all(test, feature = "integration-tests"))]
 mod tests {
     use super::*;
 

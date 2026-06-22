@@ -1,7 +1,7 @@
 use distributed_neural_network::load_balancer::LoadBalancer;
-use uuid::Uuid;
 use std::time::Instant;
 use tokio::runtime::Runtime;
+use uuid::Uuid;
 
 fn main() {
     let rt = Runtime::new().expect("runtime");

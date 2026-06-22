@@ -18,3 +18,39 @@ pub enum AnKiError {
     InvalidCiphertext,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_includes_variant_context() {
+        assert_eq!(
+            AnKiError::Messaging("boom".into()).to_string(),
+            "Messaging error: boom"
+        );
+        assert_eq!(
+            AnKiError::Network("down".into()).to_string(),
+            "Network error: down"
+        );
+        assert_eq!(
+            AnKiError::Config("bad".into()).to_string(),
+            "Config error: bad"
+        );
+        assert_eq!(
+            AnKiError::Security("nope".into()).to_string(),
+            "Security error: nope"
+        );
+        assert_eq!(
+            AnKiError::Scheduler("late".into()).to_string(),
+            "Scheduler error: late"
+        );
+        assert_eq!(
+            AnKiError::TaskRecovery("lost".into()).to_string(),
+            "Task recovery error: lost"
+        );
+        assert_eq!(
+            AnKiError::InvalidCiphertext.to_string(),
+            "Invalid ciphertext"
+        );
+    }
+}

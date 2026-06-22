@@ -1,0 +1,44 @@
+name: Deploy Checks
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+      - name: Lint chart
+        run: helm lint ./helm/an-ki
+      - name: Render templates
+        run: |
+          helm template an-ki ./helm/an-ki \
+            -f helm/an-ki/values.yaml \
+            -f helm/an-ki/values-dev.yaml > /dev/null
+          helm template an-ki ./helm/an-ki \
+            -f helm/an-ki/values.yaml \
+            -f helm/an-ki/values-prod.yaml > /dev/null
+
+  docker:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [principal, an, ki]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build ${{ matrix.node }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.${{ matrix.node }}
+          push: false
+          tags: an-ki:${{ matrix.node }}
+          cache-from: type=gha,scope=an-ki-builder
+          cache-to: type=gha,mode=max,scope=an-ki-builder,ignore-error=true
