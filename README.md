@@ -47,6 +47,15 @@ The system is composed of three main types of nodes:
 
 Inter-node communication is facilitated via RabbitMQ, and tasks are scheduled using a load balancer to optimize resource utilization.
 
+### Health Monitoring
+
+An and Ki nodes publish periodic heartbeats to the `heartbeat_queue` (every
+`HEARTBEAT_INTERVAL_MS`, default 10s). The principal consumes these heartbeats
+and tracks each node's health, logging a corrective-action alert once a node
+misses or reports `HEALTH_UNHEALTHY_THRESHOLD` consecutive unhealthy checks
+(default 3). Each node identifies itself with the `NODE_ID` environment variable
+when set, or a generated UUID otherwise.
+
 
 ## Getting Started
 

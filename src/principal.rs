@@ -1,5 +1,6 @@
 // principal.rs: Implements the specific responsibilities of the Principal, including role management and global coordination.
 
+use crate::health;
 use crate::messaging::{consume_messages, declare_queue};
 use crate::signals;
 
@@ -13,6 +14,7 @@ use lapin::{
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -87,6 +89,21 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         .await
         .map_err(Box::<dyn Error>::from)?;
 
+    // Monitor cluster health by consuming node heartbeats on a dedicated channel.
+    let health_cancel = CancellationToken::new();
+    match connection.create_channel().await {
+        Ok(health_channel) => {
+            let threshold = health::unhealthy_threshold();
+            let token = health_cancel.clone();
+            tokio::spawn(async move {
+                if let Err(e) = health::run_health_monitor(health_channel, threshold, token).await {
+                    error!("Health monitor exited with error: {:?}", e);
+                }
+            });
+        }
+        Err(e) => error!("Failed to open health-monitor channel: {:?}", e),
+    }
+
     info!("Principal node is running and waiting for update requests...");
 
     loop {
@@ -132,6 +149,9 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+
+    // Stop the health monitor before tearing down the connection.
+    health_cancel.cancel();
 
     if let Err(e) = channel.close(200, "Bye").await {
         error!("Failed to close channel: {:?}", e);

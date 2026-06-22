@@ -5,9 +5,9 @@ use std::io::{Error as IoError, ErrorKind};
 
 use crate::{
     api,
-    common::{Task, TaskType},
+    common::{self, Task, TaskType},
     config::load_settings,
-    messaging, signals,
+    health, messaging, signals,
 };
 use futures_util::stream::StreamExt;
 use lapin::{
@@ -15,6 +15,7 @@ use lapin::{
     Channel,
 };
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -226,6 +227,23 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
             error!("Task API server stopped: {:?}", e);
         }
     });
+
+    // Emit heartbeats so the principal can monitor this node's health.
+    let heartbeat_cancel = CancellationToken::new();
+    {
+        let trigger = heartbeat_cancel.clone();
+        let mut hb_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let _ = hb_shutdown.changed().await;
+            trigger.cancel();
+        });
+        tokio::spawn(health::publish_heartbeats(
+            amqp_addr.clone(),
+            common::node_id(),
+            health::heartbeat_interval(),
+            heartbeat_cancel,
+        ));
+    }
 
     let max_retries: u32 = normalized_reconnect_attempts();
     let backoff_ms: u64 = std::env::var("AMQP_RECONNECT_BACKOFF_MS")

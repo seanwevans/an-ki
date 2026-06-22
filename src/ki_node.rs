@@ -1,8 +1,9 @@
 // ki_node.rs: Manages the Ki node behavior, including fetching inputs, running computations,
 // and sending outputs.
 
-use crate::common::{Task, TaskType};
+use crate::common::{self, Task, TaskType};
 use crate::config::load_settings;
+use crate::health;
 use crate::messaging;
 use crate::signals;
 use futures_util::stream::StreamExt;
@@ -13,6 +14,7 @@ use lapin::{
 use std::error::Error;
 use std::io::{Error as IoError, ErrorKind};
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,12 +127,15 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         error!("Failed to set up Unix signal handlers: {:?}", e);
     }
 
+    let heartbeat_cancel = CancellationToken::new();
+    let heartbeat_trigger = heartbeat_cancel.clone();
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     tokio::spawn(async move {
         if let Err(e) = signals::setup_signal_handler().await {
             error!("Signal handler error: {:?}", e);
         }
         let _ = shutdown_tx.send(());
+        heartbeat_trigger.cancel();
     });
 
     let settings = load_settings().map_err(|e| {
@@ -139,6 +144,14 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     })?;
 
     let amqp_addr = settings.amqp_addr;
+
+    // Emit heartbeats so the principal can monitor this node's health.
+    tokio::spawn(health::publish_heartbeats(
+        amqp_addr.clone(),
+        common::node_id(),
+        health::heartbeat_interval(),
+        heartbeat_cancel,
+    ));
     let max_retries: u32 = normalized_reconnect_attempts();
     let backoff_ms: u64 = std::env::var("AMQP_RECONNECT_BACKOFF_MS")
         .unwrap_or_else(|_| "500".into())
