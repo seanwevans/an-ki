@@ -7,7 +7,7 @@ use crate::{
     api,
     common::{self, Task, TaskType},
     config::load_settings,
-    health, messaging, signals,
+    health, messaging, security, signals,
 };
 use futures_util::stream::StreamExt;
 use lapin::{
@@ -183,8 +183,9 @@ impl AnNodeState {
             data: serde_json::to_string(model)?,
         };
         messaging::declare_queue(channel, "ki_model_queue").await?;
-        let payload = serde_json::to_vec(&task)?;
-        messaging::publish_message(channel, "ki_model_queue", &payload).await?;
+        // Encrypt the model parameters in transit with the shared node secret.
+        let key = security::message_key()?;
+        messaging::publish_encrypted(channel, "ki_model_queue", &task, &key).await?;
         info!("Broadcasted model update");
         Ok(())
     }

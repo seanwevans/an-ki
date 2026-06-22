@@ -5,6 +5,7 @@ use crate::common::{self, Task, TaskType};
 use crate::config::load_settings;
 use crate::health;
 use crate::messaging;
+use crate::security;
 use crate::signals;
 use futures_util::stream::StreamExt;
 use lapin::{
@@ -267,7 +268,10 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 model_delivery = model_consumer.next() => {
                     match model_delivery {
                         Some(Ok(delivery)) => {
-                            match serde_json::from_slice::<Task>(&delivery.data) {
+                            let parsed = security::message_key().and_then(|key| {
+                                messaging::decrypt_payload::<Task>(&delivery.data, &key)
+                            });
+                            match parsed {
                                 Ok(task_message) => match state.update_model(&task_message) {
                                     Ok(()) => {
                                         if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
@@ -289,7 +293,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                 },
                                 Err(e) => {
                                     error!(
-                                        "Dropping malformed model update without requeue: {:?}",
+                                        "Dropping undecryptable or malformed model update without requeue: {:?}",
                                         e
                                     );
                                     if let Err(e) = delivery.nack(nack_options(false)).await {
@@ -565,8 +569,8 @@ mod tests {
             data: serde_json::to_string(&vec![0.5_f32, -1.0_f32]).unwrap(),
         };
 
-        let payload = serde_json::to_vec(&payload_task).expect("serialize task");
-        messaging::publish_message(&channel, "ki_model_queue", &payload)
+        let key = "test-model-key";
+        messaging::publish_encrypted(&channel, "ki_model_queue", &payload_task, key)
             .await
             .expect("publish model update");
 
@@ -577,7 +581,7 @@ mod tests {
 
         if let Ok(Some(Ok(delivery))) = timeout(Duration::from_secs(5), consumer.next()).await {
             let task: Task =
-                serde_json::from_slice(&delivery.data).expect("deserialize model task");
+                messaging::decrypt_payload(&delivery.data, key).expect("decrypt model task");
             let mut state = KiNodeState::new();
             state.update_model(&task).expect("update model");
             assert_eq!(state.parameters(), &[0.5_f32, -1.0_f32]);

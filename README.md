@@ -25,7 +25,7 @@ A distributed neural network project that supports task scheduling, load balanci
 
 - **Task Scheduling:** Efficient task assignment using a load balancer and asynchronous execution.
 - **Fault Tolerance:** Built-in backup and recovery mechanisms for task persistence.
-- **Secure Communication:** JWT-based authentication, role-based access control, and AES-GCM message encryption.
+- **Secure Communication:** JWT-based authentication and role-based access control on the REST API, plus AES-256-GCM encryption of model-update messages exchanged between nodes (keyed by `jwt_secret_key`).
 - **Dynamic Node Discovery:** Uses a distributed hash table (DHT) for node management.
 - **Consensus & Leader Election:** Uses the Raft protocol (via [`openraft`](https://github.com/datafuselabs/openraft)) for a replicated, consistent log and automatic leader election. The principal runs a Raft node — a single-member cluster today, with multi-node operation arriving once the networking transport in `raft_node` is implemented.
 - **Monitoring and Metrics:** Supports Prometheus metrics and detailed logging for monitoring.

@@ -43,6 +43,13 @@ fn get_secret_key() -> Result<String, AnKiError> {
         .map_err(|e| AnKiError::Config(e.to_string()))
 }
 
+/// Returns the shared secret used for symmetric (AES-256-GCM) encryption of
+/// inter-node messages. This currently reuses the JWT signing secret so a single
+/// `jwt_secret_key`/`JWT_SECRET_KEY` configures both.
+pub fn message_key() -> Result<String, AnKiError> {
+    get_secret_key()
+}
+
 pub fn generate_token(
     node_id: &str,
     role: NodeRole,

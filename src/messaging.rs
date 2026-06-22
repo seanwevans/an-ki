@@ -1,12 +1,15 @@
 // messaging.rs: Implements RabbitMQ messaging logic, including sending and receiving messages across the network.
 
 use crate::error::AnKiError;
+use crate::security::{decrypt_message, encrypt_message};
 use lapin::{
     options::*,
     publisher_confirm::{Confirmation, PublisherConfirm},
     types::FieldTable,
     BasicProperties, Channel, Connection, ConnectionProperties,
 };
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::error::Error;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};
@@ -91,6 +94,33 @@ pub async fn publish_message(
     }
 }
 
+/// Serializes `value` to JSON and encrypts it with `key` (AES-256-GCM),
+/// returning the bytes to publish. Pairs with [`decrypt_payload`].
+pub fn encrypt_payload<T: Serialize>(value: &T, key: &str) -> Result<Vec<u8>, AnKiError> {
+    let json = serde_json::to_string(value).map_err(|e| AnKiError::Messaging(e.to_string()))?;
+    Ok(encrypt_message(&json, key)?.into_bytes())
+}
+
+/// Decrypts a payload produced by [`encrypt_payload`] and deserializes it from
+/// JSON. Returns [`AnKiError::InvalidCiphertext`] if `payload` is not valid
+/// ciphertext for `key`.
+pub fn decrypt_payload<T: DeserializeOwned>(payload: &[u8], key: &str) -> Result<T, AnKiError> {
+    let encoded = std::str::from_utf8(payload).map_err(|_| AnKiError::InvalidCiphertext)?;
+    let json = decrypt_message(encoded, key)?;
+    serde_json::from_str(&json).map_err(|e| AnKiError::Messaging(e.to_string()))
+}
+
+/// Encrypts `value` with `key` and publishes the ciphertext to `queue_name`.
+pub async fn publish_encrypted<T: Serialize>(
+    channel: &Channel,
+    queue_name: &str,
+    value: &T,
+    key: &str,
+) -> Result<(), AnKiError> {
+    let payload = encrypt_payload(value, key)?;
+    publish_message(channel, queue_name, &payload).await
+}
+
 pub async fn consume_messages(
     channel: &Channel,
     queue_name: &str,
@@ -172,8 +202,42 @@ pub async fn connect_with_retries(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::{Task, TaskType};
     use tokio::sync::broadcast;
     use tokio::time::{timeout, Duration};
+    use uuid::Uuid;
+
+    fn sample_task() -> Task {
+        Task {
+            task_id: Uuid::new_v4(),
+            task_type: TaskType::ParameterPull,
+            data: "model-parameters".to_string(),
+        }
+    }
+
+    #[test]
+    fn encrypt_then_decrypt_round_trips_a_task() {
+        let task = sample_task();
+        let key = "shared-node-secret";
+        let payload = encrypt_payload(&task, key).expect("encrypt");
+        // Ciphertext must not contain the plaintext.
+        assert!(!payload.windows(5).any(|w| w == b"model"));
+        let decoded: Task = decrypt_payload(&payload, key).expect("decrypt");
+        assert_eq!(decoded.task_id, task.task_id);
+        assert_eq!(decoded.task_type, task.task_type);
+        assert_eq!(decoded.data, task.data);
+    }
+
+    #[test]
+    fn decrypt_payload_rejects_a_different_key() {
+        let payload = encrypt_payload(&sample_task(), "key-a").expect("encrypt");
+        assert!(decrypt_payload::<Task>(&payload, "key-b").is_err());
+    }
+
+    #[test]
+    fn decrypt_payload_rejects_non_ciphertext() {
+        assert!(decrypt_payload::<Task>(b"not ciphertext", "key").is_err());
+    }
 
     #[cfg(feature = "integration-tests")]
     use futures_util::StreamExt;
