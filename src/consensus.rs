@@ -137,3 +137,98 @@ pub async fn run_consensus_protocol(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proposal(content: &str) -> ConsensusProposal {
+        ConsensusProposal {
+            proposal_id: Uuid::new_v4(),
+            content: content.to_string(),
+            proposer_id: Uuid::new_v4(),
+        }
+    }
+
+    #[tokio::test]
+    async fn add_proposal_records_it_with_zero_votes() {
+        let state = ConsensusState::new();
+        let p = proposal("hello");
+        let id = p.proposal_id;
+        state.add_proposal(p).await;
+
+        assert!(state.proposal(id).await.is_some());
+        assert!(!state.has_consensus(id, 1).await);
+    }
+
+    #[tokio::test]
+    async fn votes_accumulate_until_threshold_is_met() {
+        let state = ConsensusState::new();
+        let p = proposal("c");
+        let id = p.proposal_id;
+        state.add_proposal(p).await;
+
+        assert!(!state.has_consensus(id, 2).await);
+        state.cast_vote(id).await;
+        assert!(!state.has_consensus(id, 2).await);
+        state.cast_vote(id).await;
+        assert!(state.has_consensus(id, 2).await);
+    }
+
+    #[tokio::test]
+    async fn voting_for_unknown_proposal_is_a_noop() {
+        let state = ConsensusState::new();
+        let id = Uuid::new_v4();
+        // Must not panic and must not create a phantom tally.
+        state.cast_vote(id).await;
+        assert!(!state.has_consensus(id, 1).await);
+    }
+
+    #[tokio::test]
+    async fn mark_committed_is_idempotent() {
+        let state = ConsensusState::new();
+        let id = Uuid::new_v4();
+        assert!(state.mark_committed(id).await);
+        assert!(!state.mark_committed(id).await);
+    }
+
+    #[tokio::test]
+    async fn commit_proposal_persists_once_and_broadcasts_content() {
+        let state = ConsensusState::new();
+        let dir = std::env::temp_dir().join(format!("an-ki-consensus-test-{}", Uuid::new_v4()));
+        let db: Db = sled::open(&dir).unwrap();
+        let (commit_tx, mut commit_rx) = broadcast::channel::<String>(4);
+
+        let p = proposal("commit-me");
+        let id = p.proposal_id;
+        state.add_proposal(p).await;
+
+        commit_proposal(&state, &db, &commit_tx, id).await.unwrap();
+        assert_eq!(commit_rx.recv().await.unwrap(), "commit-me");
+        assert!(db.contains_key(id.as_bytes()).unwrap());
+
+        // A second commit of the same proposal is a no-op and must not re-broadcast.
+        commit_proposal(&state, &db, &commit_tx, id).await.unwrap();
+        assert!(commit_rx.try_recv().is_err());
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn commit_proposal_ignores_unknown_proposal() {
+        let state = ConsensusState::new();
+        let dir = std::env::temp_dir().join(format!("an-ki-consensus-test-{}", Uuid::new_v4()));
+        let db: Db = sled::open(&dir).unwrap();
+        let (commit_tx, _commit_rx) = broadcast::channel::<String>(4);
+
+        let unknown = Uuid::new_v4();
+        commit_proposal(&state, &db, &commit_tx, unknown)
+            .await
+            .unwrap();
+        assert!(!db.contains_key(unknown.as_bytes()).unwrap());
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
