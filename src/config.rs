@@ -4,6 +4,7 @@ use config::{Config, ConfigError, Environment, File, FileFormat};
 use serde::Deserialize;
 use std::env;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::Path;
 
 #[derive(Debug, Deserialize)]
@@ -13,6 +14,8 @@ pub struct Settings {
     pub database_url: String,
     /// OTLP endpoint for exporting traces.
     pub otlp_endpoint: Option<String>,
+    /// Address the task REST API binds to. Defaults to `0.0.0.0:3030` when unset.
+    pub api_addr: Option<String>,
     /// Number of model shards expected when aggregating gradients.
     pub model_shards: usize,
     /// Number of training epochs the scheduler should execute.
@@ -43,8 +46,15 @@ impl Settings {
         override_from_env_or_file(&mut s, "jwt_secret_key", "JWT_SECRET_KEY")?;
         override_from_env_or_file(&mut s, "database_url", "DATABASE_URL")?;
         override_from_env_or_file(&mut s, "otlp_endpoint", "OTLP_ENDPOINT")?;
+        override_from_env_or_file(&mut s, "api_addr", "API_ADDR")?;
 
         Self::from_config(s)
+    }
+
+    /// Resolves the socket address the task REST API should bind to, falling
+    /// back to `0.0.0.0:3030` when `api_addr` is not configured.
+    pub fn api_bind_addr(&self) -> Result<SocketAddr, std::net::AddrParseError> {
+        self.api_addr.as_deref().unwrap_or("0.0.0.0:3030").parse()
     }
 
     fn from_config(s: Config) -> Result<Self, ConfigError> {
@@ -120,5 +130,41 @@ mod tests {
         assert!(err
             .to_string()
             .contains("model_shards must be greater than 0"));
+    }
+
+    fn settings_with_api_addr(api_addr: Option<&str>) -> Settings {
+        Settings {
+            amqp_addr: "amqp://127.0.0.1:5672/%2f".to_string(),
+            jwt_secret_key: "test-secret".to_string(),
+            database_url: "postgresql://root@localhost:26257/defaultdb".to_string(),
+            otlp_endpoint: None,
+            api_addr: api_addr.map(str::to_string),
+            model_shards: 1,
+            training_epochs: 1,
+        }
+    }
+
+    #[test]
+    fn api_bind_addr_defaults_to_all_interfaces() {
+        let settings = settings_with_api_addr(None);
+        assert_eq!(
+            settings.api_bind_addr().unwrap(),
+            "0.0.0.0:3030".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn api_bind_addr_uses_configured_value() {
+        let settings = settings_with_api_addr(Some("127.0.0.1:8080"));
+        assert_eq!(
+            settings.api_bind_addr().unwrap(),
+            "127.0.0.1:8080".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn api_bind_addr_rejects_garbage() {
+        let settings = settings_with_api_addr(Some("not-an-address"));
+        assert!(settings.api_bind_addr().is_err());
     }
 }

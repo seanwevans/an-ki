@@ -4,6 +4,7 @@ use std::error::Error;
 use std::io::{Error as IoError, ErrorKind};
 
 use crate::{
+    api,
     common::{Task, TaskType},
     config::load_settings,
     messaging, signals,
@@ -13,7 +14,7 @@ use lapin::{
     options::{BasicAckOptions, BasicNackOptions},
     Channel,
 };
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -188,12 +189,12 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         error!("Failed to set up Unix signal handlers: {:?}", e);
     }
 
-    let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     tokio::spawn(async move {
         if let Err(e) = signals::setup_signal_handler().await {
             error!("Signal handler error: {:?}", e);
         }
-        let _ = shutdown_tx.send(());
+        let _ = shutdown_tx.send(true);
     });
 
     let settings = load_settings().map_err(|e| {
@@ -203,6 +204,22 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let amqp_addr = settings.amqp_addr.clone();
     let shard_count = settings.model_shards;
     let mut state = AnNodeState::new();
+
+    // Serve the task REST API alongside the consumer loop. The server creates
+    // its own database-backed task manager and shuts down on the same signal.
+    let api_addr = settings.api_bind_addr().map_err(|e| {
+        error!("Invalid api_addr configuration: {:?}", e);
+        e
+    })?;
+    let mut api_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        let shutdown = async move {
+            let _ = api_shutdown.changed().await;
+        };
+        if let Err(e) = api::serve(api_addr, shutdown).await {
+            error!("Task API server stopped: {:?}", e);
+        }
+    });
 
     let max_retries: u32 = normalized_reconnect_attempts();
     let backoff_ms: u64 = std::env::var("AMQP_RECONNECT_BACKOFF_MS")
@@ -232,7 +249,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
         loop {
             tokio::select! {
-                _ = &mut shutdown_rx => {
+                _ = shutdown_rx.changed() => {
                     info!("Shutdown signal received, stopping An node...");
                     return Ok(());
                 }

@@ -5,5 +5,7 @@ amqp_addr = "amqp://127.0.0.1:5672/%2f"
 jwt_secret_key = "<JWT_SECRET_KEY>"
 database_url = "postgresql://root@localhost:26257/defaultdb?sslmode=disable"
 otlp_endpoint = "http://localhost:4317"
+# Address the task REST API binds to. Override with API_ADDR.
+api_addr = "0.0.0.0:3030"
 model_shards = 1
 training_epochs = 10

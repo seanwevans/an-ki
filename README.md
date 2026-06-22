@@ -166,7 +166,11 @@ Make sure all nodes are running simultaneously to ensure proper communication an
 
 ### API Endpoints
 
-The system provides a REST API for managing tasks, available via the Warp web server. Below are the available endpoints:
+Each **An node** hosts this REST API (via the Warp web server) on the address
+configured by `api_addr` (default `0.0.0.0:3030`, overridable with the `API_ADDR`
+environment variable). The endpoints are backed by the database-backed task
+recovery manager, so a reachable `database_url` is required. Below are the
+available endpoints:
 
 GET /tasks/{task_id}: Retrieve a specific task by providing its ID.
 
