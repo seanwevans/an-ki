@@ -37,6 +37,12 @@ pub struct NodeInfo {
     pub role: NodeRole,
 }
 
+/// Returns this process's node identifier, taken from the `NODE_ID` environment
+/// variable when set, or a freshly generated UUID otherwise.
+pub fn node_id() -> String {
+    std::env::var("NODE_ID").unwrap_or_else(|_| Uuid::new_v4().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

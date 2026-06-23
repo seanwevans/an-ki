@@ -4,16 +4,18 @@ use std::error::Error;
 use std::io::{Error as IoError, ErrorKind};
 
 use crate::{
-    common::{Task, TaskType},
+    api,
+    common::{self, Task, TaskType},
     config::load_settings,
-    messaging, signals,
+    health, messaging, security, signals,
 };
 use futures_util::stream::StreamExt;
 use lapin::{
     options::{BasicAckOptions, BasicNackOptions},
     Channel,
 };
-use tokio::sync::oneshot;
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -64,9 +66,15 @@ fn processing_disposition(outcome: ProcessingOutcome<'_>) -> DeliveryDisposition
 
 fn normalized_reconnect_attempts() -> u32 {
     let raw = std::env::var("AMQP_RECONNECT_ATTEMPTS")
-        .unwrap_or_else(|_| "5".into())
-        .parse()
+        .ok()
+        .and_then(|value| value.parse().ok())
         .unwrap_or(5);
+    normalize_reconnect_attempts(raw)
+}
+
+/// Ensures the configured retry count yields at least one attempt. A value of
+/// zero would otherwise mean "never try", which is never the intent.
+fn normalize_reconnect_attempts(raw: u32) -> u32 {
     if raw == 0 {
         error!(
             "AMQP_RECONNECT_ATTEMPTS=0 is invalid for retry semantics; normalizing to 1 total attempt."
@@ -175,8 +183,9 @@ impl AnNodeState {
             data: serde_json::to_string(model)?,
         };
         messaging::declare_queue(channel, "ki_model_queue").await?;
-        let payload = serde_json::to_vec(&task)?;
-        messaging::publish_message(channel, "ki_model_queue", &payload).await?;
+        // Encrypt the model parameters in transit with the shared node secret.
+        let key = security::message_key()?;
+        messaging::publish_encrypted(channel, "ki_model_queue", &task, &key).await?;
         info!("Broadcasted model update");
         Ok(())
     }
@@ -188,12 +197,12 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         error!("Failed to set up Unix signal handlers: {:?}", e);
     }
 
-    let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
     tokio::spawn(async move {
         if let Err(e) = signals::setup_signal_handler().await {
             error!("Signal handler error: {:?}", e);
         }
-        let _ = shutdown_tx.send(());
+        let _ = shutdown_tx.send(true);
     });
 
     let settings = load_settings().map_err(|e| {
@@ -203,6 +212,39 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let amqp_addr = settings.amqp_addr.clone();
     let shard_count = settings.model_shards;
     let mut state = AnNodeState::new();
+
+    // Serve the task REST API alongside the consumer loop. The server creates
+    // its own database-backed task manager and shuts down on the same signal.
+    let api_addr = settings.api_bind_addr().map_err(|e| {
+        error!("Invalid api_addr configuration: {:?}", e);
+        e
+    })?;
+    let mut api_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        let shutdown = async move {
+            let _ = api_shutdown.changed().await;
+        };
+        if let Err(e) = api::serve(api_addr, shutdown).await {
+            error!("Task API server stopped: {:?}", e);
+        }
+    });
+
+    // Emit heartbeats so the principal can monitor this node's health.
+    let heartbeat_cancel = CancellationToken::new();
+    {
+        let trigger = heartbeat_cancel.clone();
+        let mut hb_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let _ = hb_shutdown.changed().await;
+            trigger.cancel();
+        });
+        tokio::spawn(health::publish_heartbeats(
+            amqp_addr.clone(),
+            common::node_id(),
+            health::heartbeat_interval(),
+            heartbeat_cancel,
+        ));
+    }
 
     let max_retries: u32 = normalized_reconnect_attempts();
     let backoff_ms: u64 = std::env::var("AMQP_RECONNECT_BACKOFF_MS")
@@ -232,7 +274,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
         loop {
             tokio::select! {
-                _ = &mut shutdown_rx => {
+                _ = shutdown_rx.changed() => {
                     info!("Shutdown signal received, stopping An node...");
                     return Ok(());
                 }
@@ -353,24 +395,18 @@ mod tests {
     use tokio::time::{timeout, Duration};
 
     #[test]
-    fn test_normalized_reconnect_attempts_zero_is_one() {
-        std::env::set_var("AMQP_RECONNECT_ATTEMPTS", "0");
-        assert_eq!(normalized_reconnect_attempts(), 1);
-        std::env::remove_var("AMQP_RECONNECT_ATTEMPTS");
+    fn zero_reconnect_attempts_normalizes_to_one() {
+        assert_eq!(normalize_reconnect_attempts(0), 1);
     }
 
     #[test]
-    fn test_normalized_reconnect_attempts_one_is_one() {
-        std::env::set_var("AMQP_RECONNECT_ATTEMPTS", "1");
-        assert_eq!(normalized_reconnect_attempts(), 1);
-        std::env::remove_var("AMQP_RECONNECT_ATTEMPTS");
+    fn one_reconnect_attempt_is_preserved() {
+        assert_eq!(normalize_reconnect_attempts(1), 1);
     }
 
     #[test]
-    fn test_normalized_reconnect_attempts_high_value_is_preserved() {
-        std::env::set_var("AMQP_RECONNECT_ATTEMPTS", "100");
-        assert_eq!(normalized_reconnect_attempts(), 100);
-        std::env::remove_var("AMQP_RECONNECT_ATTEMPTS");
+    fn high_reconnect_attempt_count_is_preserved() {
+        assert_eq!(normalize_reconnect_attempts(100), 100);
     }
 
     #[tokio::test]

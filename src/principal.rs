@@ -1,6 +1,8 @@
 // principal.rs: Implements the specific responsibilities of the Principal, including role management and global coordination.
 
+use crate::health;
 use crate::messaging::{consume_messages, declare_queue};
+use crate::raft_node;
 use crate::signals;
 
 use crate::config::load_settings;
@@ -13,6 +15,7 @@ use lapin::{
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -87,6 +90,36 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         .await
         .map_err(Box::<dyn Error>::from)?;
 
+    // Monitor cluster health by consuming node heartbeats on a dedicated channel.
+    let health_cancel = CancellationToken::new();
+    match connection.create_channel().await {
+        Ok(health_channel) => {
+            let threshold = health::unhealthy_threshold();
+            let token = health_cancel.clone();
+            tokio::spawn(async move {
+                if let Err(e) = health::run_health_monitor(health_channel, threshold, token).await {
+                    error!("Health monitor exited with error: {:?}", e);
+                }
+            });
+        }
+        Err(e) => error!("Failed to open health-monitor channel: {:?}", e),
+    }
+
+    // Start the Raft consensus node. Today this is a single-member cluster that
+    // elects itself leader; multi-node operation arrives by replacing the
+    // networking stub in `raft_node` with a real transport.
+    let raft_id = raft_node::node_id_from_env();
+    let raft = match raft_node::start_single_node(raft_id).await {
+        Ok(raft) => {
+            info!("Raft consensus node started (id={})", raft_id);
+            Some(raft)
+        }
+        Err(e) => {
+            error!("Failed to start Raft consensus node: {:?}", e);
+            None
+        }
+    };
+
     info!("Principal node is running and waiting for update requests...");
 
     loop {
@@ -130,6 +163,14 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                     None => break,
                 }
             }
+        }
+    }
+
+    // Stop the health monitor and Raft node before tearing down the connection.
+    health_cancel.cancel();
+    if let Some(raft) = raft {
+        if let Err(e) = raft.shutdown().await {
+            error!("Failed to shut down Raft node: {:?}", e);
         }
     }
 

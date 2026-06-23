@@ -25,9 +25,9 @@ A distributed neural network project that supports task scheduling, load balanci
 
 - **Task Scheduling:** Efficient task assignment using a load balancer and asynchronous execution.
 - **Fault Tolerance:** Built-in backup and recovery mechanisms for task persistence.
-- **Secure Communication:** JWT-based authentication, role-based access control, and AES-GCM message encryption.
+- **Secure Communication:** JWT-based authentication and role-based access control on the REST API, plus AES-256-GCM encryption of model-update messages exchanged between nodes (keyed by `jwt_secret_key`).
 - **Dynamic Node Discovery:** Uses a distributed hash table (DHT) for node management.
-- **Leader Election:** Ensures high availability with automatic leader selection.
+- **Consensus & Leader Election:** Uses the Raft protocol (via [`openraft`](https://github.com/datafuselabs/openraft)) for a replicated, consistent log and automatic leader election. The principal runs a Raft node — a single-member cluster today, with multi-node operation arriving once the networking transport in `raft_node` is implemented.
 - **Monitoring and Metrics:** Supports Prometheus metrics and detailed logging for monitoring.
 - **Configurable:** Easily configurable using environment variables and configuration files.
 
@@ -46,6 +46,15 @@ The system is composed of three main types of nodes:
 3. **Ki Nodes:** Execute tasks assigned by An nodes and report results back.
 
 Inter-node communication is facilitated via RabbitMQ, and tasks are scheduled using a load balancer to optimize resource utilization.
+
+### Health Monitoring
+
+An and Ki nodes publish periodic heartbeats to the `heartbeat_queue` (every
+`HEARTBEAT_INTERVAL_MS`, default 10s). The principal consumes these heartbeats
+and tracks each node's health, logging a corrective-action alert once a node
+misses or reports `HEALTH_UNHEALTHY_THRESHOLD` consecutive unhealthy checks
+(default 3). Each node identifies itself with the `NODE_ID` environment variable
+when set, or a generated UUID otherwise.
 
 
 ## Getting Started
@@ -166,7 +175,11 @@ Make sure all nodes are running simultaneously to ensure proper communication an
 
 ### API Endpoints
 
-The system provides a REST API for managing tasks, available via the Warp web server. Below are the available endpoints:
+Each **An node** hosts this REST API (via the Warp web server) on the address
+configured by `api_addr` (default `0.0.0.0:3030`, overridable with the `API_ADDR`
+environment variable). The endpoints are backed by the database-backed task
+recovery manager, so a reachable `database_url` is required. Below are the
+available endpoints:
 
 GET /tasks/{task_id}: Retrieve a specific task by providing its ID.
 

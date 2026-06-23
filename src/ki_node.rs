@@ -1,9 +1,11 @@
 // ki_node.rs: Manages the Ki node behavior, including fetching inputs, running computations,
 // and sending outputs.
 
-use crate::common::{Task, TaskType};
+use crate::common::{self, Task, TaskType};
 use crate::config::load_settings;
+use crate::health;
 use crate::messaging;
+use crate::security;
 use crate::signals;
 use futures_util::stream::StreamExt;
 use lapin::{
@@ -13,6 +15,7 @@ use lapin::{
 use std::error::Error;
 use std::io::{Error as IoError, ErrorKind};
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,9 +65,15 @@ fn processing_disposition(outcome: ProcessingOutcome<'_>) -> DeliveryDisposition
 
 fn normalized_reconnect_attempts() -> u32 {
     let raw = std::env::var("AMQP_RECONNECT_ATTEMPTS")
-        .unwrap_or_else(|_| "5".into())
-        .parse()
+        .ok()
+        .and_then(|value| value.parse().ok())
         .unwrap_or(5);
+    normalize_reconnect_attempts(raw)
+}
+
+/// Ensures the configured retry count yields at least one attempt. A value of
+/// zero would otherwise mean "never try", which is never the intent.
+fn normalize_reconnect_attempts(raw: u32) -> u32 {
     if raw == 0 {
         error!(
             "AMQP_RECONNECT_ATTEMPTS=0 is invalid for retry semantics; normalizing to 1 total attempt."
@@ -119,12 +128,15 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         error!("Failed to set up Unix signal handlers: {:?}", e);
     }
 
+    let heartbeat_cancel = CancellationToken::new();
+    let heartbeat_trigger = heartbeat_cancel.clone();
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     tokio::spawn(async move {
         if let Err(e) = signals::setup_signal_handler().await {
             error!("Signal handler error: {:?}", e);
         }
         let _ = shutdown_tx.send(());
+        heartbeat_trigger.cancel();
     });
 
     let settings = load_settings().map_err(|e| {
@@ -133,6 +145,14 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     })?;
 
     let amqp_addr = settings.amqp_addr;
+
+    // Emit heartbeats so the principal can monitor this node's health.
+    tokio::spawn(health::publish_heartbeats(
+        amqp_addr.clone(),
+        common::node_id(),
+        health::heartbeat_interval(),
+        heartbeat_cancel,
+    ));
     let max_retries: u32 = normalized_reconnect_attempts();
     let backoff_ms: u64 = std::env::var("AMQP_RECONNECT_BACKOFF_MS")
         .unwrap_or_else(|_| "500".into())
@@ -248,7 +268,10 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 model_delivery = model_consumer.next() => {
                     match model_delivery {
                         Some(Ok(delivery)) => {
-                            match serde_json::from_slice::<Task>(&delivery.data) {
+                            let parsed = security::message_key().and_then(|key| {
+                                messaging::decrypt_payload::<Task>(&delivery.data, &key)
+                            });
+                            match parsed {
                                 Ok(task_message) => match state.update_model(&task_message) {
                                     Ok(()) => {
                                         if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
@@ -270,7 +293,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                 },
                                 Err(e) => {
                                     error!(
-                                        "Dropping malformed model update without requeue: {:?}",
+                                        "Dropping undecryptable or malformed model update without requeue: {:?}",
                                         e
                                     );
                                     if let Err(e) = delivery.nack(nack_options(false)).await {
@@ -391,24 +414,18 @@ mod tests {
     }
 
     #[test]
-    fn test_normalized_reconnect_attempts_zero_is_one() {
-        std::env::set_var("AMQP_RECONNECT_ATTEMPTS", "0");
-        assert_eq!(normalized_reconnect_attempts(), 1);
-        std::env::remove_var("AMQP_RECONNECT_ATTEMPTS");
+    fn zero_reconnect_attempts_normalizes_to_one() {
+        assert_eq!(normalize_reconnect_attempts(0), 1);
     }
 
     #[test]
-    fn test_normalized_reconnect_attempts_one_is_one() {
-        std::env::set_var("AMQP_RECONNECT_ATTEMPTS", "1");
-        assert_eq!(normalized_reconnect_attempts(), 1);
-        std::env::remove_var("AMQP_RECONNECT_ATTEMPTS");
+    fn one_reconnect_attempt_is_preserved() {
+        assert_eq!(normalize_reconnect_attempts(1), 1);
     }
 
     #[test]
-    fn test_normalized_reconnect_attempts_high_value_is_preserved() {
-        std::env::set_var("AMQP_RECONNECT_ATTEMPTS", "100");
-        assert_eq!(normalized_reconnect_attempts(), 100);
-        std::env::remove_var("AMQP_RECONNECT_ATTEMPTS");
+    fn high_reconnect_attempt_count_is_preserved() {
+        assert_eq!(normalize_reconnect_attempts(100), 100);
     }
 
     #[test]
@@ -552,8 +569,8 @@ mod tests {
             data: serde_json::to_string(&vec![0.5_f32, -1.0_f32]).unwrap(),
         };
 
-        let payload = serde_json::to_vec(&payload_task).expect("serialize task");
-        messaging::publish_message(&channel, "ki_model_queue", &payload)
+        let key = "test-model-key";
+        messaging::publish_encrypted(&channel, "ki_model_queue", &payload_task, key)
             .await
             .expect("publish model update");
 
@@ -564,7 +581,7 @@ mod tests {
 
         if let Ok(Some(Ok(delivery))) = timeout(Duration::from_secs(5), consumer.next()).await {
             let task: Task =
-                serde_json::from_slice(&delivery.data).expect("deserialize model task");
+                messaging::decrypt_payload(&delivery.data, key).expect("decrypt model task");
             let mut state = KiNodeState::new();
             state.update_model(&task).expect("update model");
             assert_eq!(state.parameters(), &[0.5_f32, -1.0_f32]);
