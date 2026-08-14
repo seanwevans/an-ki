@@ -58,9 +58,6 @@ tracing-opentelemetry = "0.31"
 # Environment variable configuration
 config = "0.11"
 
-# Regex for validation
-regex = "1"
-
 # HMAC and JWT for security
 jsonwebtoken = "8.1"
 hmac = "0.12"

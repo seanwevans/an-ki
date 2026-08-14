@@ -3,9 +3,8 @@
 use crate::common::NodeRole;
 use crate::health;
 use crate::messaging::{consume_messages, declare_queue};
-use crate::raft_network;
-use crate::raft_node::{self, AnKiRaft};
-use crate::raft_store::ClusterRequest;
+use crate::node_registry::{self, NodeRegistry};
+use crate::raft_node;
 use crate::signals;
 
 use crate::config::load_settings;
@@ -110,13 +109,21 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         .map_err(Box::<dyn Error>::from)?;
 
     // Monitor cluster health by consuming node heartbeats on a dedicated channel.
+    // The same heartbeats populate the node registry, which is the principal's
+    // live view of who is in the cluster and what role each node serves.
+    let registry = NodeRegistry::new();
     let health_cancel = CancellationToken::new();
     match connection.create_channel().await {
         Ok(health_channel) => {
             let threshold = health::unhealthy_threshold();
+            let ttl = node_registry::node_ttl();
             let token = health_cancel.clone();
+            let registry = registry.clone();
             tokio::spawn(async move {
-                if let Err(e) = health::run_health_monitor(health_channel, threshold, token).await {
+                if let Err(e) =
+                    health::run_health_monitor(health_channel, registry, threshold, ttl, token)
+                        .await
+                {
                     error!("Health monitor exited with error: {:?}", e);
                 }
             });
@@ -165,11 +172,16 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     info!("Principal node is running and waiting for update requests...");
 
+    let mut cluster_report = tokio::time::interval(node_registry::cluster_report_interval());
+
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => {
                 info!("Shutdown signal received, stopping Principal node...");
                 break;
+            }
+            _ = cluster_report.tick() => {
+                log_cluster_view(&registry).await;
             }
             delivery_result = consumer.next() => {
                 match delivery_result {
@@ -235,28 +247,35 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// What the principal decided to do with an update request, which determines
-/// how the delivery is settled.
-#[derive(Debug, PartialEq, Eq)]
-enum UpdateOutcome {
-    /// Committed through Raft. Acknowledge the delivery.
-    Applied,
-    /// The request itself is bad and will never succeed. Dead-letter it rather
-    /// than requeueing a message that can only fail again.
-    Rejected(String),
-    /// The request is well-formed but this node cannot serve it right now,
-    /// typically because it is not the Raft leader. Requeue so another
-    /// principal — or this one, once it catches up — can take it.
-    Retry(String),
+/// Logs the current cluster composition so operators can see which nodes the
+/// principal believes are alive without attaching a debugger.
+async fn log_cluster_view(registry: &NodeRegistry) {
+    let nodes = registry.list_nodes().await;
+    if nodes.is_empty() {
+        info!("Cluster view: no nodes have heartbeated yet");
+        return;
+    }
+
+    let mut an = 0usize;
+    let mut ki = 0usize;
+    let mut principal = 0usize;
+    for node in &nodes {
+        match node.role {
+            NodeRole::An => an += 1,
+            NodeRole::Ki => ki += 1,
+            NodeRole::Principal => principal += 1,
+        }
+    }
+    info!(
+        "Cluster view: {} node(s) alive ({} an, {} ki, {} principal)",
+        nodes.len(),
+        an,
+        ki,
+        principal
+    );
 }
 
-/// Applies an update request by committing it to the Raft log.
-///
-/// Every accepted request becomes a [`ClusterRequest`], so the decision is
-/// replicated to every principal instead of living in this process's memory.
-/// Only the leader may write, which is why a follower answers [`UpdateOutcome::Retry`]
-/// rather than applying anything locally.
-async fn process_update_request(update: UpdateRequest, raft: Option<&AnKiRaft>) -> UpdateOutcome {
+async fn process_update_request(update: UpdateRequest) -> Result<(), Box<dyn Error>> {
     info!("Processing update request with ID: {}", update.update_id);
 
     let request = match to_cluster_request(update.content) {
