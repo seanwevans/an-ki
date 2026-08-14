@@ -1114,7 +1114,6 @@ dependencies = [
  "prometheus",
  "rand 0.8.5",
  "rcgen",
- "regex",
  "ring 0.16.20",
  "rustls 0.21.12",
  "rustls-pemfile 1.0.4",
