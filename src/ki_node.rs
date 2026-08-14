@@ -8,6 +8,7 @@ use crate::health;
 use crate::logging_metrics;
 use crate::messaging;
 use crate::model;
+use crate::scheduler;
 use crate::signals;
 use futures_util::stream::StreamExt;
 use lapin::{
@@ -237,7 +238,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 async fn process_and_send_task(task: Task, channel: &Channel) -> Result<(), Box<dyn Error>> {
     let started_at = Instant::now();
     let result = perform_computation(task).await?;
-    send_result(result, channel).await?;
+    send_result(result, channel, scheduler::AN_RESULT_QUEUE).await?;
     // Only successful tasks are counted: a task that failed was not processed,
     // and counting it would inflate the throughput panel during an outage.
     logging_metrics::record_task_processed(started_at);
@@ -310,8 +311,16 @@ pub async fn perform_computation(task: Task) -> Result<Task, Box<dyn Error>> {
     }
 }
 
-async fn send_result(result: Task, channel: &Channel) -> Result<(), Box<dyn Error>> {
-    let result_queue = "an_task_queue";
+/// Publishes a completed task onto `result_queue`.
+///
+/// The queue is a parameter rather than a literal so a test can point one
+/// publish at a queue of its own; production always passes
+/// [`scheduler::AN_RESULT_QUEUE`].
+async fn send_result(
+    result: Task,
+    channel: &Channel,
+    result_queue: &str,
+) -> Result<(), Box<dyn Error>> {
     let payload = serde_json::to_vec(&result).map_err(|e| {
         error!("Failed to serialize result: {:?}", e);
         e
@@ -521,11 +530,11 @@ mod tests {
             task_type: TaskType::GradientUpdate,
             data: "ok".into(),
         };
-        send_result(result.clone(), &channel)
+        send_result(result.clone(), &channel, &queue)
             .await
             .expect("send result");
 
-        let mut consumer = messaging::consume_messages(&channel, "an_task_queue", "test_cons")
+        let mut consumer = messaging::consume_messages(&channel, &queue, "test_cons")
             .await
             .expect("consume result queue");
 

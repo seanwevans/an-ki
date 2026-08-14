@@ -469,7 +469,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         .parse()
         .unwrap_or(5_000);
 
-    let queue_name = "an_task_queue";
+    let queue_name = crate::scheduler::AN_RESULT_QUEUE;
     let consumer_tag = "an_consumer";
     let mut last_checkpointed_epoch = 0_u64;
 
