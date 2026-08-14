@@ -266,7 +266,7 @@ mod tests {
                     .await
                     .expect("ki computes a gradient");
                 state
-                    .process_task(reply, None)
+                    .process_task(reply)
                     .await
                     .expect("an node accepts the gradient");
             }
@@ -336,7 +336,7 @@ mod tests {
             .take(2)
         {
             let reply = ki_node::perform_computation(task).await.expect("gradient");
-            state.process_task(reply, None).await.expect("accepted");
+            state.process_task(reply).await.expect("accepted");
         }
 
         assert_eq!(state.parameters(), &before[..]);

@@ -39,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `model_dimension`, superseded by `hidden_units` — the parameter count now
   follows from the network shape.
+- The `ki_model_queue` parameter broadcast. An nodes encrypted and published
+  updated parameters every epoch, Ki nodes decrypted them into a field nothing
+  read, and gradient requests already carry the parameters they are evaluated
+  at. Removing it also removes a 100,000-iteration key derivation from a path
+  that ran on every epoch.
+- `messaging::encrypt_payload`, `decrypt_payload`, and `publish_encrypted`,
+  whose only caller was that broadcast. Checkpoint encryption uses the
+  `security` primitives directly.
 
 ## [0.1.0] - 2026-08-14
 
