@@ -847,23 +847,21 @@ mod tests {
     #[cfg(feature = "integration-tests")]
     use lapin::options::BasicAckOptions;
     #[cfg(feature = "integration-tests")]
-    const AMQP_ADDR: &str = "amqp://127.0.0.1:5672/%2f";
-
-    #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_setup_consumer_workflow() {
-        let (_channel, mut consumer) = messaging::connect_with_retries(
-            AMQP_ADDR,
-            "test_queue",
+        let queue = messaging::integration_queue("an-consumer");
+        let (channel, mut consumer) = messaging::connect_with_retries(
+            &messaging::integration_amqp_addr(),
+            &queue,
             "test_consumer",
             1,
             10,
             10_000,
         )
         .await
-        .expect("setup");
+        .expect("connect to the broker");
 
-        messaging::publish_message(&channel, "test_queue", b"hello")
+        messaging::publish_message(&channel, &queue, b"hello")
             .await
             .expect("publish");
 

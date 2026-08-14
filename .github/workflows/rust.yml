@@ -34,3 +34,70 @@ jobs:
         run: cargo fmt --check
       - name: Test
         run: cargo test
+
+  # The `integration-tests` feature covers the RabbitMQ, PostgreSQL, and REST
+  # API paths. Until now it ran nowhere, so those paths had no automated
+  # coverage at all — the in-process tests stop at the edge of the broker.
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      rabbitmq:
+        image: rabbitmq:3-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: an_ki
+          POSTGRES_PASSWORD: an_ki
+          POSTGRES_DB: an_ki_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # Both are read by the configuration loader's unprefixed overrides, so the
+      # suite talks to the service containers rather than config/default.toml.
+      AMQP_ADDR: amqp://127.0.0.1:5672/%2f
+      DATABASE_URL: postgresql://an_ki:an_ki@127.0.0.1:5432/an_ki_test
+      JWT_SECRET_KEY: ci-integration-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+      # Service health checks cover process start, but a broker can accept a TCP
+      # connection slightly before it is ready to serve. Failing here names the
+      # problem as "the service never came up" rather than as a test failure.
+      - name: Wait for the services
+        run: |
+          for i in $(seq 1 30); do
+            if (echo > /dev/tcp/127.0.0.1/5672) 2>/dev/null \
+               && (echo > /dev/tcp/127.0.0.1/5432) 2>/dev/null; then
+              echo "services are accepting connections"; exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::RabbitMQ or PostgreSQL did not become reachable"; exit 1
+      # Single-threaded deliberately. `security::tests` set and clear
+      # `JWT_SECRET_KEY` and `RUN_ENV`, which are process-global, and the API and
+      # checkpoint tests read those same variables to mint and verify tokens.
+      # Run in parallel they can observe each other's mutations and fail for
+      # reasons unrelated to the code under test. Serializing sidesteps that; the
+      # real fix is for those tests to stop mutating ambient environment, which
+      # is a larger change than belongs here.
+      - name: Integration tests
+        run: cargo test --features integration-tests -- --test-threads=1

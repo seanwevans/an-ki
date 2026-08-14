@@ -91,6 +91,25 @@ pub async fn publish_message(
     }
 }
 
+/// Broker address integration tests connect to.
+///
+/// Honours `AMQP_ADDR` so CI can point the suite at a service container, and
+/// falls back to a local broker for developers running one by hand.
+#[cfg(feature = "integration-tests")]
+pub fn integration_amqp_addr() -> String {
+    std::env::var("AMQP_ADDR").unwrap_or_else(|_| "amqp://127.0.0.1:5672/%2f".to_string())
+}
+
+/// A queue name unique to one test run.
+///
+/// Integration tests run in parallel against one broker. Sharing a queue name
+/// lets one test consume another's message, which fails intermittently and for
+/// reasons that have nothing to do with the code under test.
+#[cfg(feature = "integration-tests")]
+pub fn integration_queue(prefix: &str) -> String {
+    format!("{prefix}-{}", uuid::Uuid::new_v4())
+}
+
 pub async fn consume_messages(
     channel: &Channel,
     queue_name: &str,
@@ -181,25 +200,23 @@ mod tests {
     use lapin::options::BasicAckOptions;
 
     #[cfg(feature = "integration-tests")]
-    const AMQP_ADDR: &str = "amqp://127.0.0.1:5672/%2f";
-
-    #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_messaging_workflow() {
-        let channel = match establish_connection(AMQP_ADDR).await {
-            Ok(ch) => ch,
-            Err(_) => return,
-        };
-
-        declare_queue(&channel, "test_queue")
+        // No skip-on-unreachable: this test exists to prove the broker path
+        // works, and a version that passes when there is no broker proves
+        // nothing while looking like coverage.
+        let channel = establish_connection(&integration_amqp_addr())
             .await
-            .expect("declare");
+            .expect("connect to the broker");
+        let queue = integration_queue("test-messaging");
 
-        publish_message(&channel, "test_queue", b"hello")
+        declare_queue(&channel, &queue).await.expect("declare");
+
+        publish_message(&channel, &queue, b"hello")
             .await
             .expect("publish");
 
-        let mut consumer = consume_messages(&channel, "test_queue", "test_consumer")
+        let mut consumer = consume_messages(&channel, &queue, "test_consumer")
             .await
             .expect("consume");
 
@@ -259,16 +276,14 @@ mod tests {
     #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_connect_with_retries_success() {
-        let res =
-            connect_with_retries(AMQP_ADDR, "test_queue_retry", "test_tag", 1, 10, 10_000).await;
-        match res {
-            Ok((channel, consumer)) => {
-                // drop consumer to close
-                drop(consumer);
-                drop(channel);
-            }
-            Err(_) => return, // skip if RabbitMQ not available
-        }
+        let queue = integration_queue("test-retry");
+        let (channel, consumer) =
+            connect_with_retries(&integration_amqp_addr(), &queue, "test_tag", 1, 10, 10_000)
+                .await
+                .expect("connect to the broker");
+
+        drop(consumer);
+        drop(channel);
     }
 
     #[tokio::test]
