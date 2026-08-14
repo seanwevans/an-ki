@@ -27,7 +27,7 @@ A distributed neural network project that supports task scheduling, load balanci
 - **Fault Tolerance:** Tasks are persisted to the database by the task recovery manager, so they survive a node restart and can be recovered by ID.
 - **Secure Communication:** JWT-based authentication and role-based access control on the REST API, plus AES-256-GCM encryption of model-update messages exchanged between nodes (keyed by `jwt_secret_key`).
 - **Dynamic Node Discovery:** The principal derives a live cluster view from node heartbeats — nodes join by heartbeating and are evicted after `NODE_TTL_MS` of silence. No separate registration step is required.
-- **Consensus & Leader Election:** Uses the Raft protocol (via [`openraft`](https://github.com/datafuselabs/openraft)) for a replicated, consistent log and automatic leader election. The principal runs a Raft node — a single-member cluster today, with multi-node operation arriving once the networking transport in `raft_node` is implemented.
+- **Consensus & Leader Election:** Uses the Raft protocol (via [`openraft`](https://github.com/datafuselabs/openraft)) for a replicated, consistent log and automatic leader election, over a durable [`sled`](https://github.com/spacejam/sled)-backed log that survives restarts. Principals replicate to each other over HTTP, so a multi-principal cluster tolerates the loss of a minority of its members.
 - **Monitoring and Metrics:** Supports Prometheus metrics and detailed logging for monitoring.
 - **Configurable:** Easily configurable using environment variables and configuration files.
 
