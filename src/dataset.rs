@@ -14,6 +14,7 @@
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use serde::{Deserialize, Serialize};
 
 use crate::model::{MlpSpec, Sample};
 
@@ -31,7 +32,7 @@ pub const OUTPUTS: usize = 2;
 const RADIUS: f32 = 0.797_884_6;
 
 /// Describes a dataset completely: same values, same samples, on any node.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatasetSpec {
     pub samples: usize,
     pub seed: u64,

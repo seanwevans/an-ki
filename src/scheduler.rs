@@ -21,34 +21,28 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::an_node::AnNodeState;
-use crate::common::{Task, TaskType};
+use crate::common::{GradientRequest, Task, TaskType};
+use crate::dataset::DatasetSpec;
 use crate::error::AnKiError;
 use crate::messaging;
+use crate::model::MlpSpec;
 
 /// Queue Ki nodes take their work from.
 pub const KI_TASK_QUEUE: &str = "ki_task_queue";
 
-/// How training rounds are coordinated across nodes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TrainingMode {
-    /// An nodes hold the parameters, Ki nodes return gradients against them.
-    #[default]
-    ParameterServer,
-}
-
-/// Builds the tasks that make up one epoch.
+/// Builds the tasks that make up one epoch: one gradient request per shard,
+/// each naming a different slice of the dataset.
 ///
-/// Every shard receives the same starting parameters and returns a gradient; the
-/// An node averages them. Splitting the parameter vector per shard would be the
-/// data-parallel alternative, but the aggregation in
-/// [`AnNodeState::process_task`](crate::an_node::AnNodeState::process_task)
-/// averages equal-length gradients, so shards must span the whole vector.
+/// The requests differ only in `shard`. That single field is what makes the
+/// round data-parallel — with every worker handed the same slice, averaging
+/// their gradients would return exactly one gradient's worth of signal.
 ///
 /// # Errors
-/// Returns an error if `parameters` cannot be serialized, or if `shards` is zero
-/// — an epoch with no tasks would stall the round rather than complete it.
+/// Returns an error if `shards` is zero: an epoch with no tasks would stall the
+/// round rather than complete it.
 pub fn epoch_tasks(
-    mode: TrainingMode,
+    spec: MlpSpec,
+    dataset: DatasetSpec,
     shards: usize,
     parameters: &[f32],
 ) -> Result<Vec<Task>, AnKiError> {
@@ -58,28 +52,31 @@ pub fn epoch_tasks(
         ));
     }
 
-    let data = serde_json::to_string(parameters)
-        .map_err(|e| AnKiError::Scheduler(format!("failed to serialize parameters: {e}")))?;
-
-    let task_type = match mode {
-        TrainingMode::ParameterServer => TaskType::GradientUpdate,
-    };
-
-    Ok((0..shards)
-        .map(|_| Task {
-            task_id: Uuid::new_v4(),
-            task_type: task_type.clone(),
-            data: data.clone(),
+    (0..shards)
+        .map(|shard| {
+            let request = GradientRequest {
+                spec,
+                dataset,
+                shard,
+                shards,
+                parameters: parameters.to_vec(),
+            };
+            let data = serde_json::to_string(&request).map_err(|e| {
+                AnKiError::Scheduler(format!("failed to serialize gradient request: {e}"))
+            })?;
+            Ok(Task {
+                task_id: Uuid::new_v4(),
+                task_type: TaskType::GradientUpdate,
+                data,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Publishes training rounds onto [`KI_TASK_QUEUE`].
 pub struct Scheduler {
     channel: Channel,
     state: Arc<Mutex<AnNodeState>>,
-    mode: TrainingMode,
-    shards: usize,
     epochs: u32,
     interval: Duration,
 }
@@ -88,16 +85,12 @@ impl Scheduler {
     pub fn new(
         channel: Channel,
         state: Arc<Mutex<AnNodeState>>,
-        mode: TrainingMode,
-        shards: usize,
         epochs: u32,
         interval: Duration,
     ) -> Self {
         Self {
             channel,
             state,
-            mode,
-            shards,
             epochs,
             interval,
         }
@@ -106,8 +99,16 @@ impl Scheduler {
     /// Publishes one epoch's worth of tasks, reading the current parameters so
     /// each round starts from the model the previous round produced.
     pub async fn dispatch_epoch(&self) -> Result<usize, AnKiError> {
-        let parameters = self.state.lock().await.parameters().to_vec();
-        let tasks = epoch_tasks(self.mode, self.shards, &parameters)?;
+        let (spec, dataset, shards, parameters) = {
+            let state = self.state.lock().await;
+            (
+                state.spec(),
+                state.dataset(),
+                state.shards(),
+                state.parameters().to_vec(),
+            )
+        };
+        let tasks = epoch_tasks(spec, dataset, shards, &parameters)?;
 
         for task in &tasks {
             let payload = serde_json::to_vec(task).map_err(|e| {
@@ -136,10 +137,11 @@ impl Scheduler {
             return;
         }
 
+        let shards = self.state.lock().await.shards();
         let mut ticker = time::interval(self.interval);
         info!(
             "Scheduler dispatching {} epoch(s) of {} shard(s) every {:?}",
-            self.epochs, self.shards, self.interval
+            self.epochs, shards, self.interval
         );
 
         for epoch in 1..=self.epochs {
@@ -164,22 +166,74 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dataset;
+    use crate::ki_node;
+    use crate::model;
+
+    fn spec() -> MlpSpec {
+        MlpSpec::new(dataset::INPUTS, 16, dataset::OUTPUTS)
+    }
+
+    fn data() -> DatasetSpec {
+        DatasetSpec::new(256, 20_260_814)
+    }
 
     #[test]
-    fn an_epoch_emits_one_task_per_shard() {
-        let tasks = epoch_tasks(TrainingMode::ParameterServer, 3, &[0.5, 1.5]).expect("tasks");
+    fn an_epoch_emits_one_request_per_shard() {
+        let spec = spec();
+        let parameters = spec.initialize(1);
+        let tasks = epoch_tasks(spec, data(), 3, &parameters).expect("tasks");
 
         assert_eq!(tasks.len(), 3);
-        for task in &tasks {
+        for (index, task) in tasks.iter().enumerate() {
             assert_eq!(task.task_type, TaskType::GradientUpdate);
-            let payload: Vec<f32> = serde_json::from_str(&task.data).expect("payload decodes");
-            assert_eq!(payload, vec![0.5, 1.5]);
+            let request: GradientRequest =
+                serde_json::from_str(&task.data).expect("request decodes");
+            assert_eq!(request.shard, index);
+            assert_eq!(request.shards, 3);
+            assert_eq!(request.parameters, parameters);
         }
     }
 
     #[test]
+    fn each_shard_is_asked_for_a_different_slice() {
+        // This is what makes the round data-parallel. If every worker were sent
+        // the same slice, averaging their gradients would return exactly one
+        // gradient's worth of signal.
+        let spec = spec();
+        let tasks = epoch_tasks(spec, data(), 4, &spec.initialize(1)).expect("tasks");
+
+        let mut shards: Vec<usize> = tasks
+            .iter()
+            .map(|task| {
+                serde_json::from_str::<GradientRequest>(&task.data)
+                    .expect("decodes")
+                    .shard
+            })
+            .collect();
+        shards.sort_unstable();
+        assert_eq!(shards, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn requests_do_not_carry_the_dataset() {
+        // Only the seed crosses the wire, so the payload stays proportional to
+        // the model rather than to the data.
+        let spec = spec();
+        let dataset = DatasetSpec::new(100_000, 1);
+        let tasks = epoch_tasks(spec, dataset, 1, &spec.initialize(1)).expect("tasks");
+
+        assert!(
+            tasks[0].data.len() < 4_096,
+            "payload grew with the dataset: {} bytes",
+            tasks[0].data.len()
+        );
+    }
+
+    #[test]
     fn every_task_in_an_epoch_gets_its_own_id() {
-        let tasks = epoch_tasks(TrainingMode::ParameterServer, 4, &[0.0]).expect("tasks");
+        let spec = spec();
+        let tasks = epoch_tasks(spec, data(), 4, &spec.initialize(1)).expect("tasks");
 
         let mut ids: Vec<_> = tasks.iter().map(|task| task.task_id).collect();
         ids.sort();
@@ -191,82 +245,102 @@ mod tests {
     fn zero_shards_is_refused_rather_than_producing_an_empty_epoch() {
         // An empty epoch would publish nothing, so the An node would wait
         // forever for gradients that were never requested.
-        let err = epoch_tasks(TrainingMode::ParameterServer, 0, &[1.0]).expect_err("must fail");
+        let spec = spec();
+        let err = epoch_tasks(spec, data(), 0, &spec.initialize(1)).expect_err("must fail");
         assert!(err.to_string().contains("model_shards"));
     }
 
-    #[test]
-    fn an_empty_parameter_vector_still_produces_decodable_tasks() {
-        let tasks = epoch_tasks(TrainingMode::ParameterServer, 1, &[]).expect("tasks");
-        let payload: Vec<f32> = serde_json::from_str(&tasks[0].data).expect("payload decodes");
-        assert!(payload.is_empty());
+    /// Runs `epochs` complete rounds through the real functions of all three
+    /// stages — scheduler, Ki compute, An aggregation — with only the broker
+    /// left out. Returns the final state.
+    async fn train(shards: usize, epochs: usize) -> AnNodeState {
+        let spec = spec();
+        let dataset = data();
+        let mut state = AnNodeState::new(spec, dataset, shards, 1.0, 7);
+
+        for _ in 0..epochs {
+            let tasks =
+                epoch_tasks(spec, dataset, shards, state.parameters()).expect("epoch tasks");
+            for task in tasks {
+                let reply = ki_node::perform_computation(task)
+                    .await
+                    .expect("ki computes a gradient");
+                state
+                    .process_task(reply, None)
+                    .await
+                    .expect("an node accepts the gradient");
+            }
+        }
+        state
     }
 
-    /// The whole point of the scheduler: a round it dispatches must be
-    /// consumable by a Ki node and aggregate into a model update on the An node.
+    /// The claim this whole project makes: a network trained across several
+    /// workers learns a function none of them could express linearly.
     ///
-    /// This drives the real functions from all three stages — scheduler,
-    /// `ki_node::perform_computation`, `AnNodeState::process_task` — and only
-    /// leaves out the broker in the middle, so it catches payload-shape
-    /// mismatches between the stages. Those are exactly the breakages that kept
-    /// this loop from ever running: the previous scheduler emitted
-    /// `data: String::new()`, which `perform_computation` cannot parse.
+    /// The dataset is a circular decision boundary, so a model without a working
+    /// hidden layer cannot exceed roughly chance here. Reaching high accuracy is
+    /// evidence that the gradients were computed, shipped, averaged, and applied
+    /// correctly at every step.
     #[tokio::test]
-    async fn a_dispatched_epoch_flows_through_ki_and_updates_the_model() {
-        use crate::ki_node;
+    async fn training_across_four_shards_learns_the_task() {
+        let state = train(4, 400).await;
 
-        let shards = 3;
-        let initial = vec![1.0_f32, -2.0_f32];
-        let mut an_state = AnNodeState::with_parameters(initial.clone());
+        let samples = dataset::generate(data());
+        let accuracy =
+            model::accuracy(&state.spec(), state.parameters(), &samples).expect("accuracy");
+        let loss = state.last_epoch_loss().expect("an epoch completed");
 
-        let tasks = epoch_tasks(TrainingMode::ParameterServer, shards, &initial).expect("tasks");
-        assert_eq!(tasks.len(), shards);
-
-        for task in tasks {
-            // Ki side: compute the gradient for this shard.
-            let result = ki_node::perform_computation(task)
-                .await
-                .expect("ki computes a gradient");
-            // An side: accumulate it. No channel, so no broadcast is attempted.
-            an_state
-                .process_task(result, None, shards)
-                .await
-                .expect("an node accepts the gradient");
-        }
-
-        // Placeholder compute returns 2x the input, so each shard's gradient is
-        // [2, -4]; averaging `shards` of them and subtracting leaves [-1, 2].
-        assert_eq!(an_state.parameters(), &[-1.0_f32, 2.0_f32]);
-        assert_eq!(
-            an_state.pending_gradients(),
-            0,
-            "a completed round must reset the accumulator for the next epoch"
+        assert_eq!(state.epochs_completed(), 400);
+        assert!(
+            accuracy > 0.85,
+            "expected the model to learn the circle, got accuracy {accuracy} (loss {loss})"
         );
+        assert!(loss < 0.25, "loss stalled at {loss}");
+    }
+
+    #[tokio::test]
+    async fn loss_falls_over_successive_epochs() {
+        let early = train(4, 5).await.last_epoch_loss().expect("epoch");
+        let late = train(4, 150).await.last_epoch_loss().expect("epoch");
+
+        assert!(late < early, "loss did not fall: {early} then {late}");
+    }
+
+    /// Sharding must not change the answer. Four workers on quarter-shards
+    /// compute the same averaged gradient as one worker on the whole dataset,
+    /// because the An node weights each contribution by its sample count.
+    #[tokio::test]
+    async fn sharding_does_not_change_the_result() {
+        let one = train(1, 20).await;
+        let four = train(4, 20).await;
+
+        for (a, b) in one.parameters().iter().zip(four.parameters()) {
+            assert!(
+                (a - b).abs() < 1e-3,
+                "sharded training diverged: {a} vs {b}"
+            );
+        }
     }
 
     #[tokio::test]
     async fn a_partial_epoch_leaves_the_model_untouched() {
-        use crate::ki_node;
+        let spec = spec();
+        let dataset = data();
+        let mut state = AnNodeState::new(spec, dataset, 3, 1.0, 7);
+        let before = state.parameters().to_vec();
 
-        let shards = 3;
-        let initial = vec![1.0_f32];
-        let mut an_state = AnNodeState::with_parameters(initial.clone());
-        let tasks = epoch_tasks(TrainingMode::ParameterServer, shards, &initial).expect("tasks");
-
-        // Deliver only two of the three shards.
-        for task in tasks.into_iter().take(2) {
-            let result = ki_node::perform_computation(task).await.expect("gradient");
-            an_state
-                .process_task(result, None, shards)
-                .await
-                .expect("ok");
+        // Deliver two of the three shards.
+        for task in epoch_tasks(spec, dataset, 3, &before)
+            .expect("tasks")
+            .into_iter()
+            .take(2)
+        {
+            let reply = ki_node::perform_computation(task).await.expect("gradient");
+            state.process_task(reply, None).await.expect("accepted");
         }
 
-        assert_eq!(
-            an_state.parameters(),
-            &initial[..],
-            "the model must not move until a full round has arrived"
-        );
-        assert_eq!(an_state.pending_gradients(), 2);
+        assert_eq!(state.parameters(), &before[..]);
+        assert_eq!(state.pending_gradients(), 2);
+        assert_eq!(state.epochs_completed(), 0);
     }
 }

@@ -20,22 +20,50 @@ pub struct Settings {
     pub model_shards: usize,
     /// Number of training epochs the scheduler should execute.
     pub training_epochs: u32,
-    /// Length of the model parameter vector. The scheduler dispatches the
-    /// current parameters each epoch, so the model needs a shape before the
-    /// first gradient arrives.
-    #[serde(default = "default_model_dimension")]
-    pub model_dimension: usize,
+    /// Hidden units in the network. The parameter count follows from this and
+    /// the dataset's input and output widths, so it is not configured directly.
+    #[serde(default = "default_hidden_units")]
+    pub hidden_units: usize,
+    /// Step size applied to the averaged gradient each epoch.
+    #[serde(default = "default_learning_rate")]
+    pub learning_rate: f32,
+    /// Samples in the generated training set.
+    #[serde(default = "default_dataset_samples")]
+    pub dataset_samples: usize,
+    /// Seed for dataset generation. Every node must agree on this, or workers
+    /// would train on different data while averaging their gradients together.
+    #[serde(default = "default_dataset_seed")]
+    pub dataset_seed: u64,
+    /// Seed for the initial parameters.
+    #[serde(default = "default_init_seed")]
+    pub init_seed: u64,
     /// Milliseconds between training epochs.
     #[serde(default = "default_epoch_interval_ms")]
     pub epoch_interval_ms: u64,
 }
 
-fn default_model_dimension() -> usize {
-    8
+fn default_hidden_units() -> usize {
+    16
+}
+
+fn default_learning_rate() -> f32 {
+    1.0
+}
+
+fn default_dataset_samples() -> usize {
+    512
+}
+
+fn default_dataset_seed() -> u64 {
+    20_260_814
+}
+
+fn default_init_seed() -> u64 {
+    7
 }
 
 fn default_epoch_interval_ms() -> u64 {
-    1_000
+    100
 }
 
 impl Settings {
@@ -83,15 +111,39 @@ impl Settings {
         std::time::Duration::from_millis(self.epoch_interval_ms)
     }
 
+    /// Dataset every node reconstructs locally.
+    pub fn dataset_spec(&self) -> crate::dataset::DatasetSpec {
+        crate::dataset::DatasetSpec::new(self.dataset_samples, self.dataset_seed)
+    }
+
+    /// Network shape implied by the dataset and the configured hidden width.
+    pub fn model_spec(&self) -> crate::model::MlpSpec {
+        self.dataset_spec().model_spec(self.hidden_units)
+    }
+
     fn validate(self) -> Result<Self, ConfigError> {
         if self.model_shards == 0 {
             return Err(ConfigError::Message(
                 "model_shards must be greater than 0".into(),
             ));
         }
-        if self.model_dimension == 0 {
+        if self.hidden_units == 0 {
+            // With no hidden layer the network is a linear classifier, and the
+            // training task is deliberately not linearly separable.
             return Err(ConfigError::Message(
-                "model_dimension must be greater than 0".into(),
+                "hidden_units must be greater than 0".into(),
+            ));
+        }
+        if !(self.learning_rate.is_finite() && self.learning_rate > 0.0) {
+            return Err(ConfigError::Message(
+                "learning_rate must be a positive, finite number".into(),
+            ));
+        }
+        if self.dataset_samples < self.model_shards {
+            // Otherwise some shard is empty and its worker has no gradient to
+            // return, so the round can never collect a full set.
+            return Err(ConfigError::Message(
+                "dataset_samples must be at least model_shards".into(),
             ));
         }
         // A zero interval would spin the scheduler as fast as the broker
@@ -175,8 +227,12 @@ mod tests {
             api_addr: api_addr.map(str::to_string),
             model_shards: 1,
             training_epochs: 1,
-            model_dimension: 8,
-            epoch_interval_ms: 1_000,
+            hidden_units: 8,
+            learning_rate: 0.5,
+            dataset_samples: 64,
+            dataset_seed: 1,
+            init_seed: 1,
+            epoch_interval_ms: 250,
         }
     }
 

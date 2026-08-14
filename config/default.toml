@@ -10,8 +10,15 @@ otlp_endpoint = "http://localhost:4317"
 # Address the task REST API binds to. Override with API_ADDR.
 api_addr = "0.0.0.0:3030"
 model_shards = 1
-training_epochs = 10
-# Length of the model parameter vector the scheduler dispatches each epoch.
-model_dimension = 8
+training_epochs = 400
 # Milliseconds between training epochs.
-epoch_interval_ms = 1000
+epoch_interval_ms = 100
+# Hidden units in the network; the parameter count follows from this.
+hidden_units = 16
+# Step size applied to the averaged gradient each epoch.
+learning_rate = 1.0
+# Generated training set. Every node must agree on the seed.
+dataset_samples = 512
+dataset_seed = 20260814
+# Seed for the initial parameters.
+init_seed = 7

@@ -1,11 +1,13 @@
 // ki_node.rs: Manages the Ki node behavior, including fetching inputs, running computations,
 // and sending outputs.
 
-use crate::common::{self, Task, TaskType};
+use crate::common::{self, GradientReply, GradientRequest, Task, TaskType};
 use crate::config::load_settings;
+use crate::dataset;
 use crate::health;
 use crate::logging_metrics;
 use crate::messaging;
+use crate::model;
 use crate::security;
 use crate::signals;
 use futures_util::stream::StreamExt;
@@ -120,9 +122,6 @@ fn deserialize_task_message(queue_name: &str, payload: &[u8]) -> Result<Task, se
         e
     })
 }
-
-#[cfg(feature = "tch")]
-use tch::Tensor;
 
 pub async fn run() -> Result<(), Box<dyn Error>> {
     #[cfg(unix)]
@@ -333,34 +332,57 @@ async fn process_and_send_task(task: Task, channel: &Channel) -> Result<(), Box<
     Ok(())
 }
 
+/// Computes the gradient this node is responsible for.
+///
+/// For a [`TaskType::GradientUpdate`] the payload is a [`GradientRequest`]: the
+/// node rebuilds the shared dataset from its spec, takes only its own shard, and
+/// returns the mean gradient and loss over that shard. The dataset never crosses
+/// the wire — only the seed does.
 pub async fn perform_computation(task: Task) -> Result<Task, Box<dyn Error>> {
     match task.task_type {
         TaskType::GradientUpdate => {
-            info!("Performing computation for task ID: {}", task.task_id);
-            #[cfg(feature = "tch")]
-            {
-                let input: Vec<f32> = serde_json::from_str(&task.data)?;
-                let tensor = Tensor::of_slice(&input);
-                let grad_tensor = &tensor * 2.0;
-                let grad: Vec<f32> = Vec::<f32>::from(grad_tensor);
-                let data = serde_json::to_string(&grad)?;
-                Ok(Task {
-                    task_id: task.task_id,
-                    task_type: TaskType::GradientUpdate,
-                    data,
-                })
+            let request: GradientRequest = serde_json::from_str(&task.data)?;
+
+            let samples = dataset::generate(request.dataset);
+            let shard = dataset::shard(&samples, request.shard, request.shards);
+            if shard.is_empty() {
+                // A shard with no samples has no gradient to report. Treat it as
+                // bad input rather than replying with zeros, which the An node
+                // would fold into the average as though it were real evidence.
+                return Err(IoError::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "shard {} of {} is empty for a {}-sample dataset",
+                        request.shard,
+                        request.shards,
+                        samples.len()
+                    ),
+                )
+                .into());
             }
-            #[cfg(not(feature = "tch"))]
-            {
-                let input: Vec<f32> = serde_json::from_str(&task.data)?;
-                let grad: Vec<f32> = input.into_iter().map(|v| v * 2.0).collect();
-                let data = serde_json::to_string(&grad)?;
-                Ok(Task {
-                    task_id: task.task_id,
-                    task_type: TaskType::GradientUpdate,
-                    data,
-                })
-            }
+
+            let (loss, gradient) =
+                model::loss_and_gradient(&request.spec, &request.parameters, shard)
+                    .map_err(|e| IoError::new(ErrorKind::InvalidData, e.to_string()))?;
+
+            info!(
+                "Computed gradient for shard {}/{} over {} samples (loss {:.4})",
+                request.shard,
+                request.shards,
+                shard.len(),
+                loss
+            );
+
+            let reply = GradientReply {
+                gradient,
+                loss,
+                samples: shard.len(),
+            };
+            Ok(Task {
+                task_id: task.task_id,
+                task_type: TaskType::GradientUpdate,
+                data: serde_json::to_string(&reply)?,
+            })
         }
         TaskType::ParameterPull => {
             info!("Received parameter pull task ID: {}", task.task_id);
@@ -390,9 +412,8 @@ async fn send_result(result: Task, channel: &Channel) -> Result<(), Box<dyn Erro
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(not(feature = "tch"))]
-    use crate::an_node::AnNodeState;
     use crate::common::{Task, TaskType};
+    use crate::model::MlpSpec;
     use std::io::{Error as IoError, ErrorKind};
 
     #[test]
@@ -461,32 +482,101 @@ mod tests {
         assert_eq!(result.task_id, task.task_id);
     }
 
-    #[cfg(not(feature = "tch"))]
     #[tokio::test]
-    async fn test_perform_computation_gradient_update_non_tch() {
+    async fn a_gradient_request_returns_a_gradient_over_its_own_shard() {
+        let spec = MlpSpec::new(crate::dataset::INPUTS, 4, crate::dataset::OUTPUTS);
+        let data = crate::dataset::DatasetSpec::new(40, 5);
+        let request = GradientRequest {
+            spec,
+            dataset: data,
+            shard: 1,
+            shards: 4,
+            parameters: spec.initialize(2),
+        };
         let task = Task {
             task_id: uuid::Uuid::new_v4(),
             task_type: TaskType::GradientUpdate,
-            data: serde_json::to_string(&vec![1.0_f32, -0.5_f32]).unwrap(),
+            data: serde_json::to_string(&request).unwrap(),
         };
-        let result = perform_computation(task.clone()).await.unwrap();
+
+        let result = perform_computation(task.clone()).await.expect("gradient");
+
         assert_eq!(result.task_id, task.task_id);
-        assert_eq!(result.task_type, TaskType::GradientUpdate);
-        let gradient: Vec<f32> = serde_json::from_str(&result.data).unwrap();
-        assert_eq!(gradient, vec![2.0_f32, -1.0_f32]);
+        let reply: GradientReply = serde_json::from_str(&result.data).unwrap();
+        assert_eq!(reply.gradient.len(), spec.parameter_count());
+        assert_eq!(reply.samples, 10, "shard 1 of 4 over 40 samples");
+        assert!(reply.loss.is_finite() && reply.loss > 0.0);
+        assert!(reply.gradient.iter().all(|g| g.is_finite()));
     }
 
-    #[cfg(not(feature = "tch"))]
     #[tokio::test]
-    async fn test_an_node_processes_ki_payload() {
+    async fn different_shards_produce_different_gradients() {
+        // If they matched, the workers would be duplicating each other's work
+        // and the cluster would learn no faster than one node.
+        let spec = MlpSpec::new(crate::dataset::INPUTS, 4, crate::dataset::OUTPUTS);
+        let data = crate::dataset::DatasetSpec::new(64, 11);
+        let parameters = spec.initialize(2);
+
+        let gradient_for = |shard: usize| {
+            let request = GradientRequest {
+                spec,
+                dataset: data,
+                shard,
+                shards: 4,
+                parameters: parameters.clone(),
+            };
+            Task {
+                task_id: uuid::Uuid::new_v4(),
+                task_type: TaskType::GradientUpdate,
+                data: serde_json::to_string(&request).unwrap(),
+            }
+        };
+
+        let first: GradientReply =
+            serde_json::from_str(&perform_computation(gradient_for(0)).await.unwrap().data)
+                .unwrap();
+        let second: GradientReply =
+            serde_json::from_str(&perform_computation(gradient_for(1)).await.unwrap().data)
+                .unwrap();
+
+        assert_ne!(first.gradient, second.gradient);
+    }
+
+    #[tokio::test]
+    async fn an_empty_shard_is_reported_rather_than_answered_with_zeros() {
+        // Replying with zeros would fold into the An node's average as though
+        // it were real evidence, quietly damping the update.
+        let spec = MlpSpec::new(crate::dataset::INPUTS, 4, crate::dataset::OUTPUTS);
+        let request = GradientRequest {
+            spec,
+            dataset: crate::dataset::DatasetSpec::new(2, 1),
+            shard: 5,
+            shards: 8,
+            parameters: spec.initialize(1),
+        };
         let task = Task {
             task_id: uuid::Uuid::new_v4(),
             task_type: TaskType::GradientUpdate,
-            data: serde_json::to_string(&vec![0.25_f32, 0.5_f32]).unwrap(),
+            data: serde_json::to_string(&request).unwrap(),
         };
-        let result = perform_computation(task).await.unwrap();
-        let mut state = AnNodeState::new();
-        assert!(state.process_task(result, None, 1).await.is_ok());
+
+        let err = perform_computation(task).await.expect_err("must fail");
+        assert!(err.to_string().contains("empty"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_gradient_request_is_dropped_without_requeue() {
+        let task = Task {
+            task_id: uuid::Uuid::new_v4(),
+            task_type: TaskType::GradientUpdate,
+            data: "not-a-request".to_string(),
+        };
+
+        let err = perform_computation(task).await.expect_err("must fail");
+        assert_eq!(
+            processing_disposition(ProcessingOutcome::Failed(err.as_ref())),
+            DeliveryDisposition::Nack { requeue: false }
+        );
     }
 
     #[test]

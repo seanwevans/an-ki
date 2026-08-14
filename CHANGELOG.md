@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Real neural network training.** A multi-layer perceptron (`tanh` hidden
+  layer, softmax output, cross-entropy loss) with backpropagation verified
+  against finite differences, replacing the placeholder computation that
+  returned twice its input.
+- **A training task and data-parallel sharding.** A deterministic,
+  non-linearly-separable dataset generated from a seed on every node, split into
+  disjoint shards so each worker contributes independent gradient signal.
+- Configurable `hidden_units`, `learning_rate`, `dataset_samples`,
+  `dataset_seed`, and `init_seed`.
+
+### Changed
+
+- Ki nodes return a `GradientReply` carrying the mean gradient, the loss, and
+  the sample count; An nodes combine shards weighted by sample count.
+- Initial parameters are drawn from a seeded Xavier distribution rather than
+  starting at zero, without which every hidden unit stays symmetric and the
+  network cannot learn.
+- Default `training_epochs` 10 → 400 and `learning_rate` 0.5 → 1.0: the previous
+  values did not converge.
+
+### Removed
+
+- `model_dimension`, superseded by `hidden_units` — the parameter count now
+  follows from the network shape.
+
 ## [0.1.0] - 2026-08-14
 
 First tagged release. The system runs a complete training round across
@@ -71,7 +98,7 @@ backed by working implementations rather than placeholders.
 
 - The per-shard computation is a placeholder: `perform_computation` returns twice
   its input rather than a real gradient. This release provides the distributed
-  round trip, not a training algorithm.
+  round trip, not a training algorithm. (Addressed in Unreleased.)
 - Tests behind the `integration-tests` feature, which exercise the live RabbitMQ
   and PostgreSQL paths, are not run in CI.
 - The message-encryption key is derived from `jwt_secret_key`, so one secret
