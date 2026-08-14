@@ -25,7 +25,7 @@ spec:
     spec:
       containers:
         - name: principal
-          image: {{ .Values.global.imageRepository }}:{{ .Values.global.imageTag }}
+          image: {{ .Values.global.imageRepository }}:{{ .Values.global.imageTag | default .Chart.AppVersion }}
           # The StatefulSet ordinal is the natural source of a stable Raft node
           # id. Raft ids start at 1 here so that 0 never appears as an id.
           command:
