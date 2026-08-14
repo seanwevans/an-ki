@@ -1,0 +1,21 @@
+# Headless service backing the StatefulSet. It gives every principal a stable
+# per-pod DNS name (principal-0.principal-headless, ...), which is how peers
+# address each other over the Raft transport.
+apiVersion: v1
+kind: Service
+metadata:
+  name: principal-headless
+spec:
+  clusterIP: None
+  selector:
+    app: principal
+  # Published before the pod is ready so principals can reach each other while
+  # the cluster is still forming its first quorum.
+  publishNotReadyAddresses: true
+  ports:
+    - name: api
+      port: 3030
+      targetPort: 3030
+    - name: raft
+      port: {{ .Values.principal.raftPort }}
+      targetPort: {{ .Values.principal.raftPort }}
