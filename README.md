@@ -28,7 +28,7 @@ A distributed neural network project that supports task scheduling, load balanci
 - **Secure Communication:** JWT-based authentication and role-based access control on the REST API, plus AES-256-GCM encryption of model-update messages exchanged between nodes (keyed by `jwt_secret_key`).
 - **Dynamic Node Discovery:** The principal derives a live cluster view from node heartbeats — nodes join by heartbeating and are evicted after `NODE_TTL_MS` of silence. No separate registration step is required.
 - **Consensus & Leader Election:** Uses the Raft protocol (via [`openraft`](https://github.com/datafuselabs/openraft)) for a replicated, consistent log and automatic leader election, over a durable [`sled`](https://github.com/spacejam/sled)-backed log that survives restarts. Principals replicate to each other over HTTP, so a multi-principal cluster tolerates the loss of a minority of its members.
-- **Monitoring and Metrics:** Supports Prometheus metrics and detailed logging for monitoring.
+- **Monitoring and Metrics:** Prometheus metrics for task throughput and latency, plus a `consensus_state` gauge driven by real Raft leadership, and OpenTelemetry tracing.
 - **Configurable:** Easily configurable using environment variables and configuration files.
 
 ### Task Recovery Consistency
@@ -406,8 +406,19 @@ The collector scrapes these metrics and re-exports them on `9464` for federation
 
 Import the sample dashboard found at `config/grafana/node_overview.json` into Grafana. It visualizes:
 
-- **Node Status:** current health of each node.
-- **Consensus State:** leader or follower role.
-- **Task Throughput:** rate of tasks processed per minute.
+| Panel | Metric | Reported by |
+| --- | --- | --- |
+| Node Status | `node_status` | every node, set at startup |
+| Consensus State | `consensus_state` | principals only — `1` on the Raft leader, `0` on followers |
+| Task Throughput | `rate(tasks_processed_total[1m])` | An and Ki nodes, on each successfully processed task |
+
+`consensus_state` is published only by principals, because An and Ki nodes are
+not Raft members and have no leadership to report. It tracks openraft's
+leadership watch, so it changes as elections happen rather than being assumed
+from how a process was started.
+
+Only successful tasks increment `tasks_processed_total`; a task that failed was
+not processed, and counting it would make throughput look healthy during an
+outage.
 
 Configure Grafana to use the collector's Prometheus exporter (`http://localhost:9464`) as a data source.

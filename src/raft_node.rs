@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use openraft::{BasicNode, Config, Raft};
+use tokio_util::sync::CancellationToken;
 
 use crate::raft_network::{self, HttpNetworkFactory};
 use crate::raft_store::{NodeId, SledStore, TypeConfig};
@@ -117,6 +118,56 @@ pub async fn start_cluster(
     }
 
     Ok(node)
+}
+
+/// The `consensus_state` gauge value for a node: 1.0 when it is the leader,
+/// 0.0 otherwise.
+///
+/// Leadership is decided by comparing the cluster's current leader against this
+/// node's own id. A node that merely *has* a leader is a follower, so the two
+/// cases must not be conflated — reporting 1.0 for "a leader exists" would show
+/// every member of a healthy cluster as leader simultaneously.
+pub fn leadership_gauge(current_leader: Option<NodeId>, node_id: NodeId) -> f64 {
+    if current_leader == Some(node_id) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// Keeps the `consensus_state` gauge in step with this node's Raft leadership
+/// until `cancel` fires.
+///
+/// openraft publishes metrics on a watch channel, so this reacts to leadership
+/// changes as they happen rather than polling.
+pub fn spawn_leadership_reporter(node: &RaftNode, cancel: CancellationToken) {
+    let mut metrics = node.raft.metrics();
+    let node_id = node.node_id;
+
+    tokio::spawn(async move {
+        // Publish the starting value so the gauge is correct before the first
+        // leadership change, not just after it.
+        crate::logging_metrics::set_consensus_state(leadership_gauge(
+            metrics.borrow().current_leader,
+            node_id,
+        ));
+
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                changed = metrics.changed() => {
+                    if changed.is_err() {
+                        // The Raft node shut down; stop reporting.
+                        break;
+                    }
+                    let leader = metrics.borrow().current_leader;
+                    crate::logging_metrics::set_consensus_state(
+                        leadership_gauge(leader, node_id),
+                    );
+                }
+            }
+        }
+    });
 }
 
 /// Resolves this node's numeric Raft id from `RAFT_NODE_ID`, defaulting to 1.
@@ -303,6 +354,48 @@ mod tests {
         let voters: Vec<u64> = metrics.membership_config.membership().voter_ids().collect();
         assert_eq!(voters, vec![1, 2]);
 
+        node.shutdown().await.expect("clean shutdown");
+    }
+
+    #[test]
+    fn only_the_leader_reports_consensus_state_one() {
+        assert_eq!(leadership_gauge(Some(1), 1), 1.0, "leader");
+        assert_eq!(
+            leadership_gauge(Some(2), 1),
+            0.0,
+            "a follower in a healthy cluster must not report itself leader"
+        );
+        assert_eq!(leadership_gauge(None, 1), 0.0, "no leader elected yet");
+    }
+
+    #[tokio::test]
+    async fn the_gauge_follows_real_leadership() {
+        let store = SledStore::temporary().expect("temporary store");
+        let node = start_single_node(1, store).await.expect("start raft");
+        let cancel = CancellationToken::new();
+        spawn_leadership_reporter(&node, cancel.clone());
+
+        node.raft
+            .wait(Some(Duration::from_secs(10)))
+            .state(openraft::ServerState::Leader, "leader")
+            .await
+            .expect("became leader");
+
+        // The reporter reacts to a watch notification, so give it a moment to
+        // observe the election rather than asserting on a race.
+        for _ in 0..50 {
+            if crate::logging_metrics::consensus_state() == 1.0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            crate::logging_metrics::consensus_state(),
+            1.0,
+            "a node that won an election must report itself leader"
+        );
+
+        cancel.cancel();
         node.shutdown().await.expect("clean shutdown");
     }
 

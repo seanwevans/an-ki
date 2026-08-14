@@ -164,6 +164,9 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 ),
             }
 
+            // Report real leadership on the `consensus_state` gauge.
+            raft_node::spawn_leadership_reporter(&node, raft_cancel.clone());
+
             Some(node)
         }
         Err(e) => {
