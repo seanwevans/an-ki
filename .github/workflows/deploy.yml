@@ -3,8 +3,9 @@ name: Deploy Checks
 on:
   push:
     branches: [ "main" ]
+  # No branch filter: `branches` matches the PR's base, so `[main]` skipped
+  # every stacked pull request.
   pull_request:
-    branches: [ "main" ]
 
 jobs:
   helm:
