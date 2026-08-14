@@ -27,7 +27,7 @@ A distributed neural network project that supports task scheduling, load balanci
 - **Fault Tolerance:** Built-in backup and recovery mechanisms for task persistence.
 - **Secure Communication:** JWT-based authentication and role-based access control on the REST API, plus AES-256-GCM encryption of model-update messages exchanged between nodes (keyed by `jwt_secret_key`).
 - **Dynamic Node Discovery:** Uses a distributed hash table (DHT) for node management.
-- **Consensus & Leader Election:** Uses the Raft protocol (via [`openraft`](https://github.com/datafuselabs/openraft)) for a replicated, consistent log and automatic leader election, over a durable [`sled`](https://github.com/spacejam/sled)-backed log that survives restarts. The principal runs a Raft node — a single-member cluster today, with multi-node operation arriving once the networking transport in `raft_node` is implemented.
+- **Consensus & Leader Election:** Uses the Raft protocol (via [`openraft`](https://github.com/datafuselabs/openraft)) for a replicated, consistent log and automatic leader election, over a durable [`sled`](https://github.com/spacejam/sled)-backed log that survives restarts. Principals replicate to each other over HTTP, so a multi-principal cluster tolerates the loss of a minority of its members.
 - **Monitoring and Metrics:** Supports Prometheus metrics and detailed logging for monitoring.
 - **Configurable:** Easily configurable using environment variables and configuration files.
 
@@ -73,14 +73,41 @@ the vote and appended entries — are flushed before the storage call returns. A
 principal that restarts reloads its log and resumes the existing cluster instead
 of re-initializing as a fresh one.
 
+### Forming a Multi-Principal Cluster
+
+Principals carry Raft RPCs to each other over HTTP. Each one serves
+`/raft/append-entries`, `/raft/vote` and `/raft/install-snapshot` on `RAFT_ADDR`
+and dials its peers at the addresses recorded in the cluster membership.
+
+The cluster is described by `RAFT_PEERS`, a comma-separated list of
+`id=host:port` entries naming **every** principal, including this one:
+
+```bash
+export RAFT_NODE_ID=1
+export RAFT_PEERS="1=principal-0.principal-headless:4001,2=principal-1.principal-headless:4001,3=principal-2.principal-headless:4001"
+```
+
+The lowest-numbered peer initializes the cluster; the others start empty and
+receive the membership through replication. Leaving `RAFT_PEERS` unset runs a
+single-member cluster, which is the local-development default. A principal whose
+`RAFT_NODE_ID` does not appear in `RAFT_PEERS` refuses to start rather than
+quietly forming a cluster of its own.
+
+Use an odd number of principals: Raft needs a majority to commit, so 3 members
+tolerate 1 failure and 5 tolerate 2, while 2 members tolerate none.
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `RAFT_NODE_ID` | `1` | This principal's numeric Raft id; must be unique per principal |
 | `RAFT_DATA_DIR` | `data/raft` | Directory holding the Raft log and state machine |
+| `RAFT_ADDR` | `0.0.0.0:4001` | Address this principal serves Raft RPCs on |
+| `RAFT_PEERS` | unset | Full cluster membership; unset means single-member |
+| `RAFT_RPC_TIMEOUT_MS` | `2000` | Per-RPC timeout before a peer is treated as unreachable |
 
 Because this state is on disk, the Helm chart runs the principal as a
-`StatefulSet` with a per-replica `PersistentVolumeClaim` and derives
-`RAFT_NODE_ID` from the pod ordinal. Running it as a `Deployment` on ephemeral
+`StatefulSet` with a per-replica `PersistentVolumeClaim`, derives `RAFT_NODE_ID`
+from the pod ordinal, and builds `RAFT_PEERS` from the replica count against the
+headless service's per-pod DNS names. Running it as a `Deployment` on ephemeral
 storage would hand a rescheduled principal an empty log.
 
 ## Getting Started

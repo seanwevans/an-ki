@@ -1102,6 +1102,7 @@ dependencies = [
  "criterion",
  "futures-util",
  "hmac",
+ "hyper 0.14.32",
  "jsonwebtoken",
  "lapin",
  "lazy_static",

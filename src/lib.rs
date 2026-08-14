@@ -15,6 +15,7 @@ pub mod messaging;
 pub mod network;
 pub mod node_registry;
 pub mod principal;
+pub mod raft_network;
 pub mod raft_node;
 pub mod raft_store;
 pub mod scheduler;

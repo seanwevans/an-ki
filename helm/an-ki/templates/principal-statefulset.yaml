@@ -4,6 +4,10 @@ stable identity and storage that outlives the pod. A Deployment gives neither:
 rescheduling would hand the principal an empty log and it would re-initialize as
 a brand new single-member cluster, silently discarding committed state.
 */ -}}
+{{- $peers := list -}}
+{{- range $i := until (int .Values.principal.replicas) -}}
+{{- $peers = append $peers (printf "%d=principal-%d.principal-headless:%v" (add $i 1) $i $.Values.principal.raftPort) -}}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -41,8 +45,20 @@ spec:
                   fieldPath: metadata.name
             - name: RAFT_DATA_DIR
               value: {{ .Values.principal.raftDataDir | quote }}
+            - name: RAFT_ADDR
+              value: "0.0.0.0:{{ .Values.principal.raftPort }}"
+            {{- /*
+            Every principal is addressed by its stable per-pod DNS name from the
+            headless service. Ids are ordinal+1 so they line up with the
+            RAFT_NODE_ID the container computes from its own hostname.
+            */}}
+            - name: RAFT_PEERS
+              value: {{ join "," $peers | quote }}
           ports:
-            - containerPort: 3030
+            - name: api
+              containerPort: 3030
+            - name: raft
+              containerPort: {{ .Values.principal.raftPort }}
           volumeMounts:
             - name: raft-data
               mountPath: {{ .Values.principal.raftDataDir | quote }}

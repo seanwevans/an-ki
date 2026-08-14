@@ -2,6 +2,7 @@
 
 use crate::health;
 use crate::messaging::{consume_messages, declare_queue};
+use crate::raft_network;
 use crate::raft_node;
 use crate::signals;
 
@@ -105,10 +106,10 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         Err(e) => error!("Failed to open health-monitor channel: {:?}", e),
     }
 
-    // Start the Raft consensus node over its durable store. Today this is a
-    // single-member cluster that elects itself leader; multi-node operation
-    // arrives by replacing the networking stub in `raft_node` with a real
-    // transport. State committed here survives a restart.
+    // Start the Raft consensus node over its durable store, then serve the RPC
+    // endpoints its peers dial. Cluster shape comes from RAFT_PEERS; unset means
+    // a single-member cluster.
+    let raft_cancel = CancellationToken::new();
     let raft = match raft_node::start_from_env().await {
         Ok(node) => {
             info!(
@@ -116,6 +117,26 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 node.node_id,
                 raft_node::data_dir_from_env()
             );
+
+            match raft_network::bind_addr_from_env() {
+                Ok(rpc_addr) => {
+                    let handle = node.raft.clone();
+                    let token = raft_cancel.clone();
+                    tokio::spawn(async move {
+                        raft_network::serve_raft_rpc(handle, rpc_addr, async move {
+                            token.cancelled().await
+                        })
+                        .await;
+                    });
+                }
+                // Without the RPC server this node can call peers but they
+                // cannot call it, so it would never receive entries or votes.
+                Err(e) => error!(
+                    "Invalid RAFT_ADDR; peers will not be able to reach this node: {:?}",
+                    e
+                ),
+            }
+
             Some(node)
         }
         Err(e) => {
@@ -172,6 +193,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     // Stop the health monitor and Raft node before tearing down the connection.
     health_cancel.cancel();
+    raft_cancel.cancel();
     if let Some(node) = raft {
         if let Err(e) = node.shutdown().await {
             error!("Failed to shut down Raft node: {:?}", e);
