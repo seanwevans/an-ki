@@ -1,0 +1,79 @@
+name: Release
+
+# Tag-driven: pushing `v0.1.0` builds and publishes the release for it.
+on:
+  push:
+    tags: [ "v*" ]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # A tag that disagrees with Cargo.toml would publish artifacts whose
+      # embedded version does not match the release they are attached to.
+      # Catch that before building rather than after publishing.
+      - name: Check the tag matches the crate version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          chart="$(python3 -c 'import re;print(re.search(r"^version:\s*(\S+)", open("helm/an-ki/Chart.yaml").read(), re.M).group(1))')"
+          echo "tag=$tag crate=$crate chart=$chart"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag v$tag does not match Cargo.toml version $crate"; exit 1
+          fi
+          if [ "$tag" != "$chart" ]; then
+            echo "::error::tag v$tag does not match Helm chart version $chart"; exit 1
+          fi
+
+      - name: Verify the release build
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME}"
+          target="an-ki-${version}-x86_64-unknown-linux-gnu"
+          mkdir -p "dist/${target}"
+          cp target/release/distributed_neural_network "dist/${target}/an-ki"
+          cp README.md LICENSE CHANGELOG.md "dist/${target}/"
+          # Ship only the example config. `config/default.toml` carries a
+          # placeholder `jwt_secret_key`, and a downloadable artifact containing
+          # a ready-to-run secret invites someone to deploy with it.
+          mkdir -p "dist/${target}/config"
+          cp config/default.example "dist/${target}/config/"
+          tar -czf "dist/${target}.tar.gz" -C dist "${target}"
+          (cd dist && sha256sum "${target}.tar.gz" > "${target}.tar.gz.sha256")
+
+      # helm is not guaranteed on the runner image, and deploy.yml already
+      # installs it explicitly rather than assuming it.
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+
+      - name: Package Helm chart
+        run: helm package helm/an-ki --destination dist
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/*.tgz

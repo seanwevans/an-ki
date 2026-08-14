@@ -2,3 +2,5 @@ apiVersion: v2
 name: an-ki
 version: 0.1.0
 description: Helm chart for deploying principal, An, and Ki nodes
+# Version of an-ki this chart deploys. The image tag defaults to it.
+appVersion: "0.1.0"

@@ -259,6 +259,8 @@ PostgreSQL URL:
 export DATABASE_URL="postgresql://root@localhost:26257/defaultdb?sslmode=disable"
 ```
 
+### Configuration
+
 4. **Configure the project:**
    Create a `config/` directory and add configuration files. Start by copying the provided example configuration:
    ```bash
@@ -367,6 +369,32 @@ and the principal learns cluster membership from heartbeats (see
 [Health Monitoring and Node Discovery](#health-monitoring-and-node-discovery)),
 so only `amqp_addr` needs to be configured.
 
+## Modules Overview
+
+| Module | Responsibility |
+| --- | --- |
+| `main` | Entry point; dispatches to a node type by CLI argument |
+| `principal` | Coordinator: consumes cluster update requests and commits them through Raft |
+| `an_node` | Dispatches training rounds, aggregates gradients, broadcasts the model, serves the task API |
+| `ki_node` | Executes tasks and returns results |
+| `scheduler` | Builds and publishes each epoch's tasks |
+| `raft_store` | Replicated cluster state and its durable `sled`-backed Raft storage |
+| `raft_node` | Assembles the Raft instance; cluster bootstrap and leadership reporting |
+| `raft_network` | HTTP transport carrying Raft RPCs between principals |
+| `node_registry` | Live cluster membership derived from heartbeats |
+| `health` | Heartbeat publishing and the principal's health monitor |
+| `messaging` | RabbitMQ connection, publish, consume, and encrypted payload helpers |
+| `api` | REST task endpoints with JWT authentication and role checks |
+| `task_recovery` | Task persistence and recovery against PostgreSQL |
+| `database` | Connection pool and migrations |
+| `security` | JWT issuance and verification, AES-256-GCM messages, certificate handling |
+| `network` | TLS connection management between nodes |
+| `logging_metrics` | Tracing setup, Prometheus metrics, and the metrics endpoint |
+| `config` | Settings loading from files and environment |
+| `common` | Shared task and node types |
+| `error` | Crate-wide error type |
+| `signals` | Shutdown signal handling |
+
 ## Development
 
 ### Pre-commit Hooks
@@ -382,6 +410,34 @@ Run all checks manually with:
 
 ```bash
 pre-commit run --all-files
+```
+
+### Testing
+
+```bash
+cargo test
+```
+
+Tests that need a live RabbitMQ or PostgreSQL are behind a feature flag and are
+excluded from the default run:
+
+```bash
+cargo test --features integration-tests
+```
+
+These are not currently run in CI; they need a broker and a database available.
+
+### Building
+
+```bash
+cargo build --release
+```
+
+The optional `tch` feature swaps the placeholder computation for tensor
+operations via libtorch, which must be installed separately:
+
+```bash
+cargo build --release --features tch
 ```
 
 ## Monitoring
@@ -422,3 +478,13 @@ not processed, and counting it would make throughput look healthy during an
 outage.
 
 Configure Grafana to use the collector's Prometheus exporter (`http://localhost:9464`) as a data source.
+
+## Contributing
+
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) for
+the development workflow, the checks that must pass, and how changes are
+reviewed.
+
+## License
+
+Released under the MIT License. See [LICENSE](LICENSE).

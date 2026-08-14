@@ -1,6 +1,8 @@
 global:
   imageRepository: an-ki
-  imageTag: latest
+  # Defaults to the chart appVersion when left empty, so a released chart
+  # pins the image it was tested against instead of floating on `latest`.
+  imageTag: ""
   amqpAddr: amqp://rabbitmq:5672/%2f
   jwtSecretKey: change-me
   databaseUrl: postgresql://user:pass@db:5432/app
