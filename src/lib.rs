@@ -4,7 +4,6 @@ pub mod backup;
 pub mod common;
 pub mod config;
 pub mod database;
-pub mod dht;
 pub mod election;
 pub mod error;
 pub mod health;

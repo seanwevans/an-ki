@@ -1,14 +1,14 @@
 // health.rs: Implements health checks and a heartbeat mechanism for monitoring node health.
 
+use crate::common::NodeRole;
 use crate::error::AnKiError;
 use crate::messaging::{consume_messages, declare_queue, establish_connection, publish_message};
+use crate::node_registry::NodeRegistry;
 use futures_util::stream::StreamExt;
 use lapin::{options::BasicAckOptions, Channel};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::error::Error;
 use std::time::Duration;
-use tokio::sync::broadcast;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -19,6 +19,9 @@ pub const HEARTBEAT_QUEUE: &str = "heartbeat_queue";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HealthCheck {
     pub node_id: String,
+    /// Role the sending node is serving. The principal uses this to build its
+    /// view of the cluster without a separate registration handshake.
+    pub role: NodeRole,
     pub is_healthy: bool,
 }
 
@@ -40,83 +43,6 @@ pub fn unhealthy_threshold() -> u32 {
         .and_then(|value| value.parse().ok())
         .filter(|&threshold| threshold > 0)
         .unwrap_or(3)
-}
-
-pub async fn start_heartbeat(
-    interval: Duration,
-    tx: broadcast::Sender<HealthCheck>,
-    node_id: String,
-    cancel: CancellationToken,
-) {
-    let mut ticker = time::interval(interval);
-
-    loop {
-        tokio::select! {
-            _ = ticker.tick() => {
-                let health_check = HealthCheck {
-                    node_id: node_id.clone(),
-                    is_healthy: true,
-                };
-                if let Err(e) = tx.send(health_check) {
-                    error!("Failed to send heartbeat: {:?}", e);
-                } else {
-                    info!("Sent heartbeat for node: {}", node_id);
-                }
-            }
-            _ = cancel.cancelled() => {
-                info!("Heartbeat task for node {} cancelled", node_id);
-                break;
-            }
-        }
-    }
-}
-
-pub async fn monitor_health(
-    mut rx: broadcast::Receiver<HealthCheck>,
-    unhealthy_threshold: u32,
-    cancel: CancellationToken,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut unhealthy_counts: HashMap<String, u32> = HashMap::new();
-
-    loop {
-        tokio::select! {
-            result = rx.recv() => {
-                match result {
-                    Ok(health_check) => {
-                        let threshold_reached = update_unhealthy_counts(&mut unhealthy_counts, &health_check, unhealthy_threshold);
-
-                        if health_check.is_healthy {
-                            info!("Node {} is healthy.", health_check.node_id);
-                        } else if threshold_reached {
-                            error!(
-                                "Node {} has been unhealthy for {} consecutive checks. Taking corrective action.",
-                                health_check.node_id, unhealthy_threshold
-                            );
-                            // Add corrective actions here, such as restarting the node or notifying other services.
-                        } else {
-                            if let Some(count) = unhealthy_counts.get(&health_check.node_id) {
-                                error!("Node {} is unhealthy. Unhealthy count: {}", health_check.node_id, count);
-                            } else {
-                                error!("Node {} is unhealthy.", health_check.node_id);
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        info!("Heartbeat channel closed");
-                        return Ok(());
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        error!("Missed {} heartbeat messages", skipped);
-                        return Err(broadcast::error::RecvError::Lagged(skipped).into());
-                    }
-                }
-            }
-            _ = cancel.cancelled() => {
-                info!("Health monitoring cancelled");
-                return Ok(());
-            }
-        }
-    }
 }
 
 fn update_unhealthy_counts(
@@ -143,6 +69,7 @@ fn update_unhealthy_counts(
 pub async fn publish_heartbeats(
     amqp_addr: String,
     node_id: String,
+    role: NodeRole,
     interval: Duration,
     cancel: CancellationToken,
 ) {
@@ -177,6 +104,7 @@ pub async fn publish_heartbeats(
                 };
                 let health_check = HealthCheck {
                     node_id: node_id.clone(),
+                    role: role.clone(),
                     is_healthy: true,
                 };
                 match serde_json::to_vec(&health_check) {
@@ -193,21 +121,34 @@ pub async fn publish_heartbeats(
     }
 }
 
-/// Consumes heartbeats from [`HEARTBEAT_QUEUE`] and tracks per-node health,
-/// alerting when a node exceeds `unhealthy_threshold` consecutive bad reports.
+/// Consumes heartbeats from [`HEARTBEAT_QUEUE`], maintains the cluster view in
+/// `registry`, and tracks per-node health, alerting when a node exceeds
+/// `unhealthy_threshold` consecutive bad reports.
+///
+/// Each heartbeat both refreshes the sender's entry in the registry and feeds
+/// the unhealthy-streak counter. A node that stops heartbeating is evicted from
+/// the registry once it has been silent for `ttl`; a node that keeps
+/// heartbeating but reports itself unhealthy stays registered and alerts
+/// instead, since it is still reachable.
+///
 /// Runs until `cancel` fires or the consumer stream closes.
 pub async fn run_health_monitor(
     channel: Channel,
+    registry: NodeRegistry,
     unhealthy_threshold: u32,
+    ttl: Duration,
     cancel: CancellationToken,
 ) -> Result<(), AnKiError> {
     declare_queue(&channel, HEARTBEAT_QUEUE).await?;
     let mut consumer =
         consume_messages(&channel, HEARTBEAT_QUEUE, "principal_health_consumer").await?;
     let mut counts: HashMap<String, u32> = HashMap::new();
+    // Sweep often enough that an evicted node is noticed well within its TTL
+    // rather than up to a full TTL late.
+    let mut sweep = time::interval(sweep_interval(ttl));
     info!(
-        "Principal health monitor consuming heartbeats (unhealthy_threshold={})",
-        unhealthy_threshold
+        "Principal health monitor consuming heartbeats (unhealthy_threshold={}, node_ttl={:?})",
+        unhealthy_threshold, ttl
     );
 
     loop {
@@ -216,11 +157,21 @@ pub async fn run_health_monitor(
                 info!("Health monitor cancelled");
                 break;
             }
+            _ = sweep.tick() => {
+                for node_id in registry.prune_stale(ttl).await {
+                    // The node is gone, so its unhealthy streak is meaningless;
+                    // if it comes back it should start from a clean slate.
+                    counts.remove(&node_id);
+                }
+            }
             delivery = consumer.next() => {
                 match delivery {
                     Some(Ok(delivery)) => {
                         match serde_json::from_slice::<HealthCheck>(&delivery.data) {
                             Ok(health_check) => {
+                                registry
+                                    .record_heartbeat(&health_check.node_id, health_check.role.clone())
+                                    .await;
                                 let alert = update_unhealthy_counts(
                                     &mut counts,
                                     &health_check,
@@ -259,50 +210,17 @@ pub async fn run_health_monitor(
     Ok(())
 }
 
+/// How often the monitor sweeps for stale nodes: a third of the TTL, clamped to
+/// at least a second so a tiny configured TTL cannot spin the loop.
+fn sweep_interval(ttl: Duration) -> Duration {
+    (ttl / 3).max(Duration::from_secs(1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
     use tokio::time::Duration;
-
-    #[tokio::test]
-    async fn monitor_health_returns_on_channel_close() {
-        let (tx, rx) = broadcast::channel(16);
-        let cancel = CancellationToken::new();
-
-        let handle = tokio::spawn(async move { monitor_health(rx, 1, cancel).await });
-
-        // Drop the sender to close the channel
-        drop(tx);
-
-        let res = tokio::time::timeout(Duration::from_secs(1), handle)
-            .await
-            .expect("monitor_health did not return in time")
-            .expect("task panicked");
-
-        assert!(res.is_ok());
-    }
-
-    #[tokio::test]
-    async fn start_heartbeat_stops_on_cancel() {
-        let (tx, mut rx) = broadcast::channel(16);
-        let cancel = CancellationToken::new();
-        let node_id = "test-node".to_string();
-        let hb_cancel = cancel.clone();
-
-        let handle = tokio::spawn(async move {
-            start_heartbeat(Duration::from_millis(10), tx, node_id, hb_cancel).await
-        });
-
-        // Receive one heartbeat to ensure the task is running
-        rx.recv().await.unwrap();
-        cancel.cancel();
-
-        tokio::time::timeout(Duration::from_secs(1), handle)
-            .await
-            .expect("start_heartbeat did not stop in time")
-            .expect("task panicked");
-    }
 
     #[test]
     fn update_unhealthy_counts_tracks_per_node_thresholds() {
@@ -317,6 +235,7 @@ mod tests {
             &mut counts,
             &HealthCheck {
                 node_id: node_a.clone(),
+                role: NodeRole::Ki,
                 is_healthy: false,
             },
             threshold,
@@ -329,6 +248,7 @@ mod tests {
             &mut counts,
             &HealthCheck {
                 node_id: node_b.clone(),
+                role: NodeRole::Ki,
                 is_healthy: false,
             },
             threshold,
@@ -341,6 +261,7 @@ mod tests {
             &mut counts,
             &HealthCheck {
                 node_id: node_a.clone(),
+                role: NodeRole::Ki,
                 is_healthy: false,
             },
             threshold,
@@ -354,6 +275,7 @@ mod tests {
             &mut counts,
             &HealthCheck {
                 node_id: node_b.clone(),
+                role: NodeRole::Ki,
                 is_healthy: true,
             },
             threshold,
@@ -367,11 +289,13 @@ mod tests {
     fn health_check_round_trips_through_json() {
         let health_check = HealthCheck {
             node_id: "node-1".to_string(),
+            role: NodeRole::An,
             is_healthy: false,
         };
         let json = serde_json::to_string(&health_check).unwrap();
         let decoded: HealthCheck = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.node_id, health_check.node_id);
+        assert_eq!(decoded.role, health_check.role);
         assert_eq!(decoded.is_healthy, health_check.is_healthy);
     }
 
@@ -393,6 +317,7 @@ mod tests {
             publish_heartbeats(
                 "amqp://127.0.0.1:1/%2f".to_string(),
                 "node-1".to_string(),
+                NodeRole::Ki,
                 Duration::from_millis(10),
                 cancel,
             ),

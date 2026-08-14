@@ -26,7 +26,7 @@ A distributed neural network project that supports task scheduling, load balanci
 - **Task Scheduling:** Efficient task assignment using a load balancer and asynchronous execution.
 - **Fault Tolerance:** Built-in backup and recovery mechanisms for task persistence.
 - **Secure Communication:** JWT-based authentication and role-based access control on the REST API, plus AES-256-GCM encryption of model-update messages exchanged between nodes (keyed by `jwt_secret_key`).
-- **Dynamic Node Discovery:** Uses a distributed hash table (DHT) for node management.
+- **Dynamic Node Discovery:** The principal derives a live cluster view from node heartbeats — nodes join by heartbeating and are evicted after `NODE_TTL_MS` of silence. No separate registration step is required.
 - **Consensus & Leader Election:** Uses the Raft protocol (via [`openraft`](https://github.com/datafuselabs/openraft)) for a replicated, consistent log and automatic leader election. The principal runs a Raft node — a single-member cluster today, with multi-node operation arriving once the networking transport in `raft_node` is implemented.
 - **Monitoring and Metrics:** Supports Prometheus metrics and detailed logging for monitoring.
 - **Configurable:** Easily configurable using environment variables and configuration files.
@@ -47,14 +47,34 @@ The system is composed of three main types of nodes:
 
 Inter-node communication is facilitated via RabbitMQ, and tasks are scheduled using a load balancer to optimize resource utilization.
 
-### Health Monitoring
+### Health Monitoring and Node Discovery
 
 An and Ki nodes publish periodic heartbeats to the `heartbeat_queue` (every
-`HEARTBEAT_INTERVAL_MS`, default 10s). The principal consumes these heartbeats
-and tracks each node's health, logging a corrective-action alert once a node
-misses or reports `HEALTH_UNHEALTHY_THRESHOLD` consecutive unhealthy checks
-(default 3). Each node identifies itself with the `NODE_ID` environment variable
-when set, or a generated UUID otherwise.
+`HEARTBEAT_INTERVAL_MS`, default 10s). Each heartbeat carries the sender's
+identity and role. Each node identifies itself with the `NODE_ID` environment
+variable when set, or a generated UUID otherwise.
+
+The principal consumes these heartbeats and uses them for two things:
+
+1. **Health tracking.** It logs a corrective-action alert once a node reports
+   `HEALTH_UNHEALTHY_THRESHOLD` consecutive unhealthy checks (default 3).
+2. **Cluster membership.** It maintains a `NodeRegistry` — the live set of nodes
+   and their roles. A node joins the registry the first time it heartbeats and
+   is evicted once it has been silent for `NODE_TTL_MS` (default 30s, which
+   tolerates two missed beats at the default interval). The principal logs the
+   cluster composition every `CLUSTER_REPORT_INTERVAL_MS` (default 60s).
+
+Membership is derived entirely from heartbeats, so there is no registration
+handshake to get wrong: a restarted node reappears under its own identity, and a
+node that dies disappears on its own.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `NODE_ID` | generated UUID | Identity a node heartbeats under |
+| `HEARTBEAT_INTERVAL_MS` | `10000` | How often a node heartbeats |
+| `HEALTH_UNHEALTHY_THRESHOLD` | `3` | Consecutive bad reports before alerting |
+| `NODE_TTL_MS` | `30000` | Silence before a node is evicted from the registry |
+| `CLUSTER_REPORT_INTERVAL_MS` | `60000` | How often the principal logs the cluster view |
 
 
 ## Getting Started
@@ -228,8 +248,10 @@ production environments.
 
 Within Kubernetes, each node is exposed via a `Service`, enabling discovery through
 Kubernetes DNS (e.g., `principal.default.svc.cluster.local`). Outside Kubernetes,
-nodes rely on the built-in DHT for dynamic discovery or can be configured with
-explicit addresses using the configuration system.
+nodes find each other through the broker: everything is addressed by queue name,
+and the principal learns cluster membership from heartbeats (see
+[Health Monitoring and Node Discovery](#health-monitoring-and-node-discovery)),
+so only `amqp_addr` needs to be configured.
 
 ## Development
 
