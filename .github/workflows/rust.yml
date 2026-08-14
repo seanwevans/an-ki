@@ -3,8 +3,10 @@ name: CI
 on:
   push:
     branches: [ "main" ]
+  # No branch filter: a `branches` list here matches the PR's *base*, so
+  # `[main]` silently skipped every stacked pull request. Those are exactly the
+  # ones most likely to merge badly, so they need CI most.
   pull_request:
-    branches: [ "main" ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,15 +19,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
-      - uses: actions/cache@v3
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}      
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      # `--all-targets` so tests and benches are linted too; without it clippy
+      # only sees the library and binaries.
       - name: Lint
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
       - name: Format
         run: cargo fmt --check
       - name: Test
