@@ -2,6 +2,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::dataset::DatasetSpec;
+use crate::model::MlpSpec;
+
 /// Represents the kind of task being dispatched between nodes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum TaskType {
@@ -20,6 +23,39 @@ pub struct Task {
     /// Payload associated with the task. This may contain serialized gradients
     /// or model parameters depending on the [`TaskType`].
     pub data: String,
+}
+
+/// What an An node asks a Ki node to compute: the gradient of one shard of the
+/// dataset at a given point in parameter space.
+///
+/// The dataset itself is not included. Every node reconstructs it from
+/// [`DatasetSpec`], so the payload stays proportional to the model rather than
+/// to the data.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GradientRequest {
+    /// Shape of the network the parameters describe.
+    pub spec: MlpSpec,
+    /// Dataset every worker rebuilds locally.
+    pub dataset: DatasetSpec,
+    /// Which shard this worker is responsible for.
+    pub shard: usize,
+    /// How many shards the dataset is divided into.
+    pub shards: usize,
+    /// Parameters to evaluate the gradient at.
+    pub parameters: Vec<f32>,
+}
+
+/// What a Ki node returns: the mean gradient over its shard, with enough
+/// context for the An node to combine it correctly with other shards.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GradientReply {
+    /// Mean gradient over the shard, in the model's flat parameter layout.
+    pub gradient: Vec<f32>,
+    /// Mean loss over the shard, for monitoring convergence.
+    pub loss: f32,
+    /// Samples the mean was taken over. The An node weights by this so shards
+    /// of unequal size still give every sample the same influence.
+    pub samples: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

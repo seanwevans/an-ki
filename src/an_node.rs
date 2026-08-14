@@ -5,9 +5,12 @@ use std::io::{Error as IoError, ErrorKind};
 
 use crate::{
     api,
-    common::{self, Task, TaskType},
+    common::{self, GradientReply, Task, TaskType},
     config::load_settings,
-    health, logging_metrics, messaging, scheduler, security, signals,
+    dataset::DatasetSpec,
+    health, logging_metrics, messaging,
+    model::MlpSpec,
+    scheduler, security, signals,
 };
 use futures_util::stream::StreamExt;
 use lapin::{
@@ -87,112 +90,179 @@ fn normalize_reconnect_attempts(raw: u32) -> u32 {
     }
 }
 
-#[derive(Default)]
+/// The An node's view of training: the model, and the gradients accumulated
+/// toward the current epoch.
 pub struct AnNodeState {
-    model_params: Vec<f32>,
-    grad_accum: (Vec<f32>, usize),
+    spec: MlpSpec,
+    dataset: DatasetSpec,
+    parameters: Vec<f32>,
+    learning_rate: f32,
+    shards: usize,
+    /// Sum of each shard's mean gradient weighted by its sample count.
+    accumulator: Vec<f32>,
+    accumulated_samples: usize,
+    replies: usize,
+    /// Sum of each shard's mean loss weighted by its sample count.
+    loss_accumulator: f64,
+    last_epoch_loss: Option<f32>,
+    epochs_completed: u64,
 }
 
 impl AnNodeState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Starts from a known parameter vector. The scheduler dispatches the
-    /// current parameters each epoch, so the model needs a shape before the
-    /// first round rather than being inferred from the first gradient.
-    pub fn with_parameters(parameters: Vec<f32>) -> Self {
+    /// Builds the initial state, drawing starting parameters from `init_seed`.
+    ///
+    /// The parameters must not start at zero: identical hidden units receive
+    /// identical gradients forever, so the network would never use more than one
+    /// of them. See [`MlpSpec::initialize`].
+    pub fn new(
+        spec: MlpSpec,
+        dataset: DatasetSpec,
+        shards: usize,
+        learning_rate: f32,
+        init_seed: u64,
+    ) -> Self {
+        let parameters = spec.initialize(init_seed);
         Self {
-            model_params: parameters,
-            grad_accum: (Vec::new(), 0),
+            accumulator: vec![0.0; parameters.len()],
+            spec,
+            dataset,
+            parameters,
+            learning_rate,
+            shards,
+            accumulated_samples: 0,
+            replies: 0,
+            loss_accumulator: 0.0,
+            last_epoch_loss: None,
+            epochs_completed: 0,
         }
     }
 
     /// The current model parameters.
     pub fn parameters(&self) -> &[f32] {
-        &self.model_params
+        &self.parameters
     }
 
-    /// How many gradients have arrived toward the current round. Reaching the
-    /// shard count is what triggers a model update and broadcast.
+    pub fn spec(&self) -> MlpSpec {
+        self.spec
+    }
+
+    pub fn dataset(&self) -> DatasetSpec {
+        self.dataset
+    }
+
+    pub fn shards(&self) -> usize {
+        self.shards
+    }
+
+    /// Gradients received toward the current epoch.
     pub fn pending_gradients(&self) -> usize {
-        self.grad_accum.1
+        self.replies
     }
 
+    /// Mean loss of the last completed epoch, once one has completed.
+    pub fn last_epoch_loss(&self) -> Option<f32> {
+        self.last_epoch_loss
+    }
+
+    pub fn epochs_completed(&self) -> u64 {
+        self.epochs_completed
+    }
+
+    /// Folds one worker's reply into the current epoch, applying the update and
+    /// broadcasting the new model once every shard has reported.
     pub async fn process_task(
         &mut self,
         task: Task,
         channel: Option<&Channel>,
-        shard_count: usize,
     ) -> Result<(), Box<dyn Error>> {
-        if shard_count == 0 {
-            return Err(IoError::new(
-                ErrorKind::InvalidInput,
-                "shard_count must be greater than 0",
-            )
-            .into());
-        }
-
         match task.task_type {
             TaskType::GradientUpdate => {
-                let gradient: Vec<f32> = serde_json::from_str(&task.data)?;
-                if !self.grad_accum.0.is_empty() && self.grad_accum.0.len() != gradient.len() {
-                    return Err(IoError::new(
-                        ErrorKind::InvalidData,
-                        format!(
-                            "Gradient length mismatch for accumulator: expected {}, received {}",
-                            self.grad_accum.0.len(),
-                            gradient.len()
-                        ),
-                    )
-                    .into());
-                }
-                if !self.model_params.is_empty() && self.model_params.len() != gradient.len() {
-                    return Err(IoError::new(
-                        ErrorKind::InvalidData,
-                        format!(
-                            "Gradient length mismatch for model parameters: expected {}, received {}",
-                            self.model_params.len(),
-                            gradient.len()
-                        ),
-                    )
-                    .into());
-                }
-                let broadcast_data = {
-                    if self.grad_accum.0.is_empty() {
-                        self.grad_accum.0 = vec![0.0; gradient.len()];
+                let reply: GradientReply = serde_json::from_str(&task.data)?;
+                self.accumulate(reply)?;
+
+                if self.replies >= self.shards {
+                    let model = self.apply_epoch();
+                    if let Some(ch) = channel {
+                        self.broadcast_model(&model, ch).await?;
                     }
-                    for (a, g) in self.grad_accum.0.iter_mut().zip(&gradient) {
-                        *a += g;
-                    }
-                    self.grad_accum.1 += 1;
-                    if self.grad_accum.1 >= shard_count {
-                        if self.model_params.is_empty() {
-                            self.model_params.resize(self.grad_accum.0.len(), 0.0);
-                        }
-                        for (m, a) in self.model_params.iter_mut().zip(self.grad_accum.0.iter()) {
-                            *m -= *a / shard_count as f32;
-                        }
-                        let model_clone = self.model_params.clone();
-                        self.grad_accum.0.iter_mut().for_each(|v| *v = 0.0);
-                        self.grad_accum.1 = 0;
-                        Some(model_clone)
-                    } else {
-                        None
-                    }
-                };
-                if let (Some(ch), Some(model)) = (channel, broadcast_data) {
-                    self.broadcast_model(&model, ch).await?;
                 }
             }
             TaskType::ParameterPull => {
                 if let Some(ch) = channel {
-                    let model = self.model_params.clone();
+                    let model = self.parameters.clone();
                     self.broadcast_model(&model, ch).await?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Adds one shard's contribution to the epoch.
+    ///
+    /// Contributions are weighted by sample count rather than averaged evenly
+    /// across shards. Both give the same answer for equal shards, but weighting
+    /// stays correct when the dataset does not divide evenly, where an even
+    /// average would quietly give samples in smaller shards more influence.
+    fn accumulate(&mut self, reply: GradientReply) -> Result<(), Box<dyn Error>> {
+        if reply.gradient.len() != self.parameters.len() {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "Gradient length mismatch: expected {}, received {}",
+                    self.parameters.len(),
+                    reply.gradient.len()
+                ),
+            )
+            .into());
+        }
+        if reply.samples == 0 {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                "gradient reported over zero samples carries no information",
+            )
+            .into());
+        }
+        if !reply.loss.is_finite() || reply.gradient.iter().any(|g| !g.is_finite()) {
+            // A non-finite gradient poisons every parameter it touches and can
+            // never be recovered from, so reject it rather than folding it in.
+            return Err(
+                IoError::new(ErrorKind::InvalidData, "gradient or loss was not finite").into(),
+            );
+        }
+
+        let weight = reply.samples as f32;
+        for (slot, g) in self.accumulator.iter_mut().zip(&reply.gradient) {
+            *slot += g * weight;
+        }
+        self.loss_accumulator += reply.loss as f64 * reply.samples as f64;
+        self.accumulated_samples += reply.samples;
+        self.replies += 1;
+        Ok(())
+    }
+
+    /// Applies the accumulated gradient and resets for the next epoch.
+    fn apply_epoch(&mut self) -> Vec<f32> {
+        let total = self.accumulated_samples as f32;
+        for (parameter, accumulated) in self.parameters.iter_mut().zip(&self.accumulator) {
+            *parameter -= self.learning_rate * (accumulated / total);
+        }
+
+        self.last_epoch_loss =
+            Some((self.loss_accumulator / self.accumulated_samples as f64) as f32);
+        self.epochs_completed += 1;
+        info!(
+            "Epoch {} complete over {} samples from {} shard(s): loss {:.5}",
+            self.epochs_completed,
+            self.accumulated_samples,
+            self.replies,
+            self.last_epoch_loss.unwrap_or(f32::NAN)
+        );
+
+        self.accumulator.iter_mut().for_each(|value| *value = 0.0);
+        self.accumulated_samples = 0;
+        self.loss_accumulator = 0.0;
+        self.replies = 0;
+        self.parameters.clone()
     }
 
     async fn broadcast_model(
@@ -237,10 +307,13 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     // The scheduler dispatches the current parameters each epoch, so the model
     // needs a shape before the first round rather than being inferred from the
     // first gradient to arrive.
-    let state = Arc::new(Mutex::new(AnNodeState::with_parameters(vec![
-        0.0;
-        settings.model_dimension
-    ])));
+    let state = Arc::new(Mutex::new(AnNodeState::new(
+        settings.model_spec(),
+        settings.dataset_spec(),
+        shard_count,
+        settings.learning_rate,
+        settings.init_seed,
+    )));
 
     // Serve the task REST API alongside the consumer loop. The server creates
     // its own database-backed task manager and shuts down on the same signal.
@@ -310,8 +383,6 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                 let scheduler = scheduler::Scheduler::new(
                     scheduler_channel,
                     Arc::clone(&state),
-                    scheduler::TrainingMode::default(),
-                    shard_count,
                     settings.training_epochs,
                     settings.epoch_interval(),
                 );
@@ -350,7 +421,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                     let outcome = state
                                         .lock()
                                         .await
-                                        .process_task(task_message, Some(&channel), shard_count)
+                                        .process_task(task_message, Some(&channel))
                                         .await;
                                     if outcome.is_ok() {
                                         logging_metrics::record_task_processed(started_at);
@@ -477,79 +548,151 @@ mod tests {
         assert_eq!(normalize_reconnect_attempts(100), 100);
     }
 
-    #[tokio::test]
-    async fn test_first_gradient_initializes_state() {
-        let task = Task {
+    fn test_spec() -> MlpSpec {
+        MlpSpec::new(crate::dataset::INPUTS, 4, crate::dataset::OUTPUTS)
+    }
+
+    fn test_state(shards: usize) -> AnNodeState {
+        AnNodeState::new(test_spec(), DatasetSpec::new(64, 1), shards, 0.5, 3)
+    }
+
+    fn reply_task(gradient: Vec<f32>, loss: f32, samples: usize) -> Task {
+        Task {
             task_id: Uuid::new_v4(),
             task_type: TaskType::GradientUpdate,
-            data: serde_json::to_string(&vec![0.1_f32, 0.2_f32]).unwrap(),
-        };
-        let mut state = AnNodeState::new();
-        assert!(state.process_task(task, None, 1).await.is_ok());
-        assert_eq!(state.model_params, vec![-0.1_f32, -0.2_f32]);
-        assert_eq!(state.grad_accum.0, vec![0.0_f32, 0.0_f32]);
-        assert_eq!(state.grad_accum.1, 0);
+            data: serde_json::to_string(&GradientReply {
+                gradient,
+                loss,
+                samples,
+            })
+            .unwrap(),
+        }
     }
 
     #[tokio::test]
-    async fn test_matching_lengths_succeed() {
-        let mut state = AnNodeState {
-            model_params: vec![1.0_f32, 2.0_f32],
-            grad_accum: (vec![0.0_f32, 0.0_f32], 0),
-        };
-        let task = Task {
-            task_id: Uuid::new_v4(),
-            task_type: TaskType::GradientUpdate,
-            data: serde_json::to_string(&vec![0.5_f32, 1.5_f32]).unwrap(),
-        };
+    async fn a_full_round_steps_the_parameters_down_the_gradient() {
+        let mut state = test_state(1);
+        let before = state.parameters().to_vec();
+        let gradient = vec![1.0_f32; before.len()];
 
-        assert!(state.process_task(task, None, 1).await.is_ok());
-        assert_eq!(state.model_params, vec![0.5_f32, 0.5_f32]);
-        assert_eq!(state.grad_accum.0, vec![0.0_f32, 0.0_f32]);
-        assert_eq!(state.grad_accum.1, 0);
+        state
+            .process_task(reply_task(gradient, 0.5, 10), None)
+            .await
+            .expect("accepted");
+
+        // One shard, uniform gradient of 1, learning rate 0.5.
+        for (after, start) in state.parameters().iter().zip(&before) {
+            assert!((after - (start - 0.5)).abs() < 1e-6);
+        }
+        assert_eq!(state.epochs_completed(), 1);
+        assert_eq!(state.last_epoch_loss(), Some(0.5));
+        assert_eq!(state.pending_gradients(), 0, "accumulator must reset");
     }
 
     #[tokio::test]
-    async fn test_mismatched_lengths_fail_without_mutation() {
-        let mut state = AnNodeState {
-            model_params: vec![1.0_f32, 2.0_f32],
-            grad_accum: (vec![0.1_f32, 0.2_f32], 1),
-        };
-        let original_model = state.model_params.clone();
-        let original_accum = state.grad_accum.clone();
-        let task = Task {
-            task_id: Uuid::new_v4(),
-            task_type: TaskType::GradientUpdate,
-            data: serde_json::to_string(&vec![0.3_f32, 0.4_f32, 0.5_f32]).unwrap(),
-        };
+    async fn shards_are_weighted_by_their_sample_count() {
+        // Two shards of unequal size: the mean gradient over all 30 samples is
+        // (1*10 + 4*20)/30 = 3, not the unweighted shard average of 2.5.
+        let mut state = test_state(2);
+        let before = state.parameters().to_vec();
+        let width = before.len();
 
-        let err = state.process_task(task, None, 1).await.unwrap_err();
-        let err_msg = err.to_string();
-        assert!(err_msg.contains("expected 2, received 3"));
-        assert_eq!(state.model_params, original_model);
-        assert_eq!(state.grad_accum, original_accum);
+        state
+            .process_task(reply_task(vec![1.0; width], 1.0, 10), None)
+            .await
+            .expect("accepted");
+        state
+            .process_task(reply_task(vec![4.0; width], 4.0, 20), None)
+            .await
+            .expect("accepted");
+
+        for (after, start) in state.parameters().iter().zip(&before) {
+            assert!(
+                (after - (start - 0.5 * 3.0)).abs() < 1e-5,
+                "expected a sample-weighted mean of 3"
+            );
+        }
+        assert_eq!(state.last_epoch_loss(), Some(3.0));
     }
 
     #[tokio::test]
-    async fn test_zero_shard_count_fails_without_mutation() {
-        let mut state = AnNodeState {
-            model_params: vec![1.0_f32, 2.0_f32],
-            grad_accum: (vec![0.1_f32, 0.2_f32], 1),
-        };
-        let original_model = state.model_params.clone();
-        let original_accum = state.grad_accum.clone();
-        let task = Task {
-            task_id: Uuid::new_v4(),
-            task_type: TaskType::GradientUpdate,
-            data: serde_json::to_string(&vec![0.3_f32, 0.4_f32]).unwrap(),
-        };
+    async fn a_mismatched_gradient_is_rejected_without_mutating_the_model() {
+        let mut state = test_state(1);
+        let before = state.parameters().to_vec();
 
-        let err = state.process_task(task, None, 0).await.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("shard_count must be greater than 0"));
-        assert_eq!(state.model_params, original_model);
-        assert_eq!(state.grad_accum, original_accum);
+        let err = state
+            .process_task(reply_task(vec![1.0; 3], 0.1, 5), None)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Gradient length mismatch"));
+        assert_eq!(state.parameters(), &before[..]);
+        assert_eq!(state.pending_gradients(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_non_finite_gradient_is_rejected_by_the_accumulator() {
+        // NaN poisons every parameter it touches and cannot be recovered from.
+        // Constructed directly rather than through a task, because JSON cannot
+        // even represent NaN — see the test below for that layer.
+        let mut state = test_state(1);
+        let before = state.parameters().to_vec();
+        let width = before.len();
+
+        let err = state
+            .accumulate(GradientReply {
+                gradient: vec![f32::NAN; width],
+                loss: 0.1,
+                samples: 5,
+            })
+            .unwrap_err();
+
+        assert!(err.to_string().contains("not finite"), "got: {err}");
+        assert_eq!(state.parameters(), &before[..]);
+        assert_eq!(state.pending_gradients(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_non_finite_gradient_cannot_even_survive_the_wire() {
+        // serde_json encodes NaN and infinity as `null`, which fails to decode
+        // back into f32. So a corrupt worker cannot deliver one over AMQP at
+        // all; the accumulator's guard covers the in-process path.
+        let mut state = test_state(1);
+        let before = state.parameters().to_vec();
+        let width = before.len();
+
+        let err = state
+            .process_task(reply_task(vec![f32::INFINITY; width], 0.1, 5), None)
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.is::<serde_json::Error>(),
+            "expected a decode failure, got: {err}"
+        );
+        assert_eq!(state.parameters(), &before[..]);
+    }
+
+    #[tokio::test]
+    async fn a_gradient_over_zero_samples_is_rejected() {
+        let mut state = test_state(1);
+        let width = state.parameters().len();
+
+        let err = state
+            .process_task(reply_task(vec![1.0; width], 0.1, 0), None)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("zero samples"));
+    }
+
+    #[tokio::test]
+    async fn initial_parameters_are_not_all_zero() {
+        // Zero-initialised weights leave every hidden unit symmetric, so the
+        // network could never use more than one of them.
+        let state = test_state(1);
+        assert!(state.parameters().iter().any(|&p| p != 0.0));
+        assert_eq!(state.parameters().len(), test_spec().parameter_count());
     }
 
     #[cfg(feature = "integration-tests")]
