@@ -22,6 +22,13 @@ spec:
   clusterIP: None
   selector:
     app: principal
+  # Published before the pod is ready so principals can reach each other while
+  # the cluster is still forming its first quorum.
+  publishNotReadyAddresses: true
   ports:
-    - port: 3030
+    - name: api
+      port: 3030
       targetPort: 3030
+    - name: raft
+      port: {{ .Values.principal.raftPort }}
+      targetPort: {{ .Values.principal.raftPort }}

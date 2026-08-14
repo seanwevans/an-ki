@@ -93,14 +93,69 @@ the vote and appended entries — are flushed before the storage call returns. A
 principal that restarts reloads its log and resumes the existing cluster instead
 of re-initializing as a fresh one.
 
+### Cluster Update Requests
+
+Cluster-wide changes are requested by publishing to `principal_update_queue`.
+The principal validates each request, commits it to the Raft log, and only then
+acknowledges the message — so an accepted request is replicated to every
+principal, not applied in one process's memory.
+
+```json
+{"update_id": "1", "content": {"type": "assign_role", "data": {"node_id": "ki-0", "role": "Ki"}}}
+{"update_id": "2", "content": {"type": "clear_role",  "data": {"node_id": "ki-0"}}}
+{"update_id": "3", "content": {"type": "set_config",  "data": {"key": "model_shards", "value": "4"}}}
+```
+
+How a request is settled depends on why it failed:
+
+- **Applied** — committed through Raft; the message is acknowledged.
+- **Rejected** — the request can never succeed (malformed payload, blank
+  identifier). It is dead-lettered rather than requeued, since retrying a
+  message that can only fail again just burns the queue.
+- **Requeued** — the request is valid but this principal is not the Raft leader,
+  or its Raft node is not running. The message goes back on the queue for the
+  leader to pick up.
+
+> **Note:** there is deliberately no request type for executing SQL. An earlier
+> `database` variant accepted an arbitrary statement from anyone able to publish
+> to the queue. Schema changes belong in `migrations/`; data changes belong
+> behind the authenticated task API.
+
+### Forming a Multi-Principal Cluster
+
+Principals carry Raft RPCs to each other over HTTP. Each one serves
+`/raft/append-entries`, `/raft/vote` and `/raft/install-snapshot` on `RAFT_ADDR`
+and dials its peers at the addresses recorded in the cluster membership.
+
+The cluster is described by `RAFT_PEERS`, a comma-separated list of
+`id=host:port` entries naming **every** principal, including this one:
+
+```bash
+export RAFT_NODE_ID=1
+export RAFT_PEERS="1=principal-0.principal-headless:4001,2=principal-1.principal-headless:4001,3=principal-2.principal-headless:4001"
+```
+
+The lowest-numbered peer initializes the cluster; the others start empty and
+receive the membership through replication. Leaving `RAFT_PEERS` unset runs a
+single-member cluster, which is the local-development default. A principal whose
+`RAFT_NODE_ID` does not appear in `RAFT_PEERS` refuses to start rather than
+quietly forming a cluster of its own.
+
+Use an odd number of principals: Raft needs a majority to commit, so 3 members
+tolerate 1 failure and 5 tolerate 2, while 2 members tolerate none.
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `RAFT_NODE_ID` | `1` | This principal's numeric Raft id; must be unique per principal |
 | `RAFT_DATA_DIR` | `data/raft` | Directory holding the Raft log and state machine |
+| `RAFT_ADDR` | `0.0.0.0:4001` | Address this principal serves Raft RPCs on |
+| `RAFT_PEERS` | unset | Full cluster membership; unset means single-member |
+| `RAFT_RPC_TIMEOUT_MS` | `2000` | Per-RPC timeout before a peer is treated as unreachable |
 
 Because this state is on disk, the Helm chart runs the principal as a
-`StatefulSet` with a per-replica `PersistentVolumeClaim` and derives
-`RAFT_NODE_ID` from the pod ordinal. Running it as a `Deployment` on ephemeral
+`StatefulSet` with a per-replica `PersistentVolumeClaim`, derives `RAFT_NODE_ID`
+from the pod ordinal, and builds `RAFT_PEERS` from the replica count against the
+headless service's per-pod DNS names. Running it as a `Deployment` on ephemeral
 storage would hand a rescheduled principal an empty log.
 
 ## Getting Started

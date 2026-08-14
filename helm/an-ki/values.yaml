@@ -11,6 +11,8 @@ principal:
   # path is backed by a per-replica PersistentVolumeClaim.
   raftDataDir: /var/lib/an-ki/raft
   raftDataSize: 1Gi
+  # Port principals exchange Raft RPCs on.
+  raftPort: 4001
   # Leave empty to use the cluster's default StorageClass.
   storageClassName: ""
 

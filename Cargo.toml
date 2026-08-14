@@ -23,8 +23,12 @@ async-trait = "0.1"
 # Message passing (RabbitMQ)
 lapin = "2.0"
 
-# Web framework for REST API
+# Web framework for REST API and the Raft RPC endpoints
 warp = "0.3"
+# HTTP client for Raft peer-to-peer RPCs. Pinned to the hyper major version warp
+# already builds on, so this enables client features on an existing dependency
+# rather than adding a second HTTP stack.
+hyper = { version = "0.14", features = ["client", "http1", "tcp"] }
 tokio-postgres = { version = "0.7", features = ["with-uuid-1"] }
 futures-util = "0.3"
 chrono = { version = "0.4", features = ["serde"] }

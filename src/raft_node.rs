@@ -1,27 +1,22 @@
 //! Raft consensus node wiring via [`openraft`].
 //!
 //! [`raft_store`](crate::raft_store) supplies the durable log and the
-//! application state machine; this module assembles them into a running
-//! [`AnKiRaft`] instance and resolves the node's identity from the environment.
+//! application state machine, [`raft_network`](crate::raft_network) carries RPCs
+//! between principals, and this module assembles them into a running
+//! [`AnKiRaft`] instance.
 //!
-//! [`StubNetworkFactory`] is the single extension point remaining for multi-node
-//! operation. A single-node cluster never dials peers, so the stub is sufficient
-//! today; a real transport plugs in by replacing its RPC methods with ones that
-//! actually reach the target node.
+//! Cluster shape comes from `RAFT_PEERS`. With it unset the node runs as a
+//! single-member cluster, which is the local-development case. With it set, the
+//! lowest-numbered peer initializes the cluster with the full membership and the
+//! others come up empty and wait to be replicated to.
 
 use std::collections::BTreeMap;
-use std::io::Error as IoError;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use openraft::error::{InstallSnapshotError, RPCError, RaftError, Unreachable};
-use openraft::network::RPCOption;
-use openraft::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
-    VoteRequest, VoteResponse,
-};
-use openraft::{BasicNode, Config, Raft, RaftNetwork, RaftNetworkFactory};
+use openraft::{BasicNode, Config, Raft};
 
+use crate::raft_network::{self, HttpNetworkFactory};
 use crate::raft_store::{NodeId, SledStore, TypeConfig};
 
 /// Convenience alias for this application's Raft handle.
@@ -46,62 +41,6 @@ impl RaftNode {
     }
 }
 
-/// Builds the `Unreachable` RPC error the stub network returns for every peer.
-fn no_transport<E>() -> RPCError<NodeId, BasicNode, E>
-where
-    E: std::error::Error,
-{
-    let io = IoError::other("no peer transport configured for this Raft node");
-    RPCError::Unreachable(Unreachable::new(&io))
-}
-
-/// Network factory for single-node clusters. It produces [`StubNetwork`] clients
-/// whose RPCs always report the peer as unreachable; multi-node transport is
-/// introduced by replacing this factory.
-#[derive(Clone, Default)]
-pub struct StubNetworkFactory;
-
-/// A network client that cannot reach peers. A single-node cluster never invokes
-/// its methods; it exists so the [`Raft`] instance has a complete network type.
-pub struct StubNetwork;
-
-impl RaftNetworkFactory<TypeConfig> for StubNetworkFactory {
-    type Network = StubNetwork;
-
-    async fn new_client(&mut self, _target: NodeId, _node: &BasicNode) -> Self::Network {
-        StubNetwork
-    }
-}
-
-impl RaftNetwork<TypeConfig> for StubNetwork {
-    async fn append_entries(
-        &mut self,
-        _rpc: AppendEntriesRequest<TypeConfig>,
-        _option: RPCOption,
-    ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
-        Err(no_transport())
-    }
-
-    async fn install_snapshot(
-        &mut self,
-        _rpc: InstallSnapshotRequest<TypeConfig>,
-        _option: RPCOption,
-    ) -> Result<
-        InstallSnapshotResponse<NodeId>,
-        RPCError<NodeId, BasicNode, RaftError<NodeId, InstallSnapshotError>>,
-    > {
-        Err(no_transport())
-    }
-
-    async fn vote(
-        &mut self,
-        _rpc: VoteRequest<NodeId>,
-        _option: RPCOption,
-    ) -> Result<VoteResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
-        Err(no_transport())
-    }
-}
-
 /// Builds a Raft node over `store` without forming a cluster. The returned node
 /// has no leader until it is initialized (see [`start_single_node`]) or joins an
 /// existing cluster.
@@ -114,7 +53,7 @@ pub async fn build_node(
     let raft = Raft::new(
         node_id,
         config,
-        StubNetworkFactory,
+        HttpNetworkFactory::default(),
         log_store,
         state_machine,
     )
@@ -128,20 +67,45 @@ pub async fn build_node(
 
 /// Builds a Raft node and initializes it as a single-member cluster, so it
 /// elects itself leader and accepts writes immediately.
-///
-/// Initialization is skipped when the store already holds a log, which is what
-/// makes a restart resume the existing cluster instead of clobbering it with a
-/// fresh single-member configuration.
 pub async fn start_single_node(
     node_id: NodeId,
     store: Arc<SledStore>,
 ) -> Result<RaftNode, RaftSetupError> {
-    let node = build_node(node_id, store).await?;
-
     let mut members = BTreeMap::new();
     members.insert(node_id, BasicNode::default());
+    start_cluster(node_id, store, members).await
+}
+
+/// Builds a Raft node and, if this node is responsible for bootstrapping,
+/// initializes the cluster with `members`.
+///
+/// Exactly one node may initialize a cluster, so the lowest id in the
+/// membership does it; every other node starts empty and receives the
+/// membership through replication. Initialization is skipped entirely when the
+/// store already holds a log, which is what makes a restart resume the existing
+/// cluster instead of clobbering it with a fresh configuration.
+pub async fn start_cluster(
+    node_id: NodeId,
+    store: Arc<SledStore>,
+    members: BTreeMap<NodeId, BasicNode>,
+) -> Result<RaftNode, RaftSetupError> {
+    let node = build_node(node_id, store).await?;
+
+    // Every node racing to initialize would produce competing configurations,
+    // so the choice of bootstrapper has to be one every node agrees on without
+    // communicating. The lowest id is that choice.
+    let bootstrapper = members.keys().next().copied();
+    if bootstrapper != Some(node_id) {
+        tracing::info!(
+            "Raft node {} waiting for node {:?} to initialize the cluster",
+            node_id,
+            bootstrapper
+        );
+        return Ok(node);
+    }
+
     match node.raft.initialize(members).await {
-        Ok(()) => {}
+        Ok(()) => tracing::info!("Raft node {} initialized the cluster", node_id),
         // A store carried over from a previous run is already initialized;
         // re-initializing it would discard the membership it recovered.
         Err(openraft::error::RaftError::APIError(
@@ -171,8 +135,15 @@ pub fn data_dir_from_env() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("data/raft"))
 }
 
-/// Opens the configured store and starts a single-member cluster on it. This is
-/// the entry point the principal uses.
+/// Opens the configured store and starts this node's Raft instance, forming a
+/// cluster of whatever `RAFT_PEERS` describes. This is the entry point the
+/// principal uses.
+///
+/// # Errors
+/// Returns an error if `RAFT_PEERS` is malformed or names a cluster this node is
+/// not part of. Both are refused rather than silently downgraded to a
+/// single-node cluster: a principal that quietly forms its own cluster would
+/// diverge from the one it was meant to join.
 pub async fn start_from_env() -> Result<RaftNode, RaftSetupError> {
     let node_id = node_id_from_env();
     let data_dir = data_dir_from_env();
@@ -180,7 +151,28 @@ pub async fn start_from_env() -> Result<RaftNode, RaftSetupError> {
     let path = data_dir.join(node_id.to_string());
     std::fs::create_dir_all(&path)?;
     let store = SledStore::open(&path)?;
-    start_single_node(node_id, store).await
+
+    let peers = raft_network::peers_from_env()?;
+    if peers.is_empty() {
+        tracing::info!("RAFT_PEERS is unset; running Raft as a single-member cluster");
+        return start_single_node(node_id, store).await;
+    }
+    if !peers.contains_key(&node_id) {
+        return Err(format!(
+            "RAFT_NODE_ID {} does not appear in RAFT_PEERS ({:?}); \
+             refusing to start rather than form a separate cluster",
+            node_id,
+            peers.keys().collect::<Vec<_>>()
+        )
+        .into());
+    }
+
+    tracing::info!(
+        "Starting Raft node {} in a {}-member cluster",
+        node_id,
+        peers.len()
+    );
+    start_cluster(node_id, store, peers).await
 }
 
 #[cfg(test)]
@@ -274,6 +266,44 @@ mod tests {
 
         node.shutdown().await.expect("clean shutdown");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_non_bootstrapping_member_starts_without_a_leader() {
+        // Node 2 is not the lowest id, so it must not initialize anything; it
+        // waits for node 1 to replicate the membership to it.
+        let mut members = BTreeMap::new();
+        members.insert(1, BasicNode::new("127.0.0.1:4001"));
+        members.insert(2, BasicNode::new("127.0.0.1:4002"));
+
+        let store = SledStore::temporary().expect("temporary store");
+        let node = start_cluster(2, store, members).await.expect("start raft");
+
+        assert_eq!(
+            node.raft.current_leader().await,
+            None,
+            "a follower must not elect itself before the cluster is initialized"
+        );
+
+        node.shutdown().await.expect("clean shutdown");
+    }
+
+    #[tokio::test]
+    async fn the_lowest_id_bootstraps_the_cluster() {
+        let mut members = BTreeMap::new();
+        members.insert(1, BasicNode::new("127.0.0.1:4001"));
+        members.insert(2, BasicNode::new("127.0.0.1:4002"));
+
+        let store = SledStore::temporary().expect("temporary store");
+        let node = start_cluster(1, store, members).await.expect("start raft");
+
+        // Node 1 initialized a two-member cluster whose peer is absent, so it
+        // cannot win an election — but the membership must have been recorded.
+        let metrics = node.raft.metrics().borrow().clone();
+        let voters: Vec<u64> = metrics.membership_config.membership().voter_ids().collect();
+        assert_eq!(voters, vec![1, 2]);
+
+        node.shutdown().await.expect("clean shutdown");
     }
 
     #[test]
