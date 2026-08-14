@@ -507,14 +507,12 @@ mod tests {
         use futures_util::StreamExt;
         use tokio::time::{timeout, Duration};
 
-        const AMQP_ADDR: &str = "amqp://127.0.0.1:5672/%2f";
+        let channel = messaging::establish_connection(&messaging::integration_amqp_addr())
+            .await
+            .expect("connect to the broker");
+        let queue = messaging::integration_queue("an-task");
 
-        let channel = match messaging::establish_connection(AMQP_ADDR).await {
-            Ok(ch) => ch,
-            Err(_) => return, // RabbitMQ not available
-        };
-
-        messaging::declare_queue(&channel, "an_task_queue")
+        messaging::declare_queue(&channel, &queue)
             .await
             .expect("declare result queue");
 

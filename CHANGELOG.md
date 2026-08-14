@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `integration-tests` suite now runs in CI against RabbitMQ and PostgreSQL
+  service containers. It previously ran nowhere, so the broker, database, and
+  REST API paths had no automated coverage. Several of those tests also returned
+  early when their service was unreachable, which made a missing service
+  indistinguishable from a passing test; they now fail.
+- Integration tests use per-run queue names instead of sharing fixed ones, so
+  parallel tests can no longer consume each other's messages.
+
 - Opening the Raft store now retries briefly on I/O failure. sled holds an
   exclusive directory lock that is released when the previous handle drops, so a
   container restarting promptly could race the departing process and fail to

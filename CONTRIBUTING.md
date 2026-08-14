@@ -28,12 +28,30 @@ cargo test
 
 Note `--all-targets`: without it clippy skips test code.
 
-Tests requiring a live broker or database are behind a feature flag and do not
-run by default or in CI:
+Tests requiring a live broker or database are behind a feature flag, so they do
+not run by default:
 
 ```bash
 cargo test --features integration-tests
 ```
+
+They **do** run in CI, against RabbitMQ and PostgreSQL service containers. To
+run them locally, start both and point the suite at them:
+
+```bash
+docker run -d -p 5672:5672 rabbitmq:3-alpine
+docker run -d -p 5432:5432 -e POSTGRES_USER=an_ki -e POSTGRES_PASSWORD=an_ki \
+  -e POSTGRES_DB=an_ki_test postgres:16-alpine
+
+AMQP_ADDR=amqp://127.0.0.1:5672/%2f \
+DATABASE_URL=postgresql://an_ki:an_ki@127.0.0.1:5432/an_ki_test \
+JWT_SECRET_KEY=local-test-secret \
+  cargo test --features integration-tests -- --test-threads=1
+```
+
+These tests must never skip themselves when a service is unreachable. A test
+that quietly passes without a broker is worse than no test: it reports coverage
+it does not have.
 
 Chart changes are validated by the Deploy Checks workflow, which runs
 `helm lint` and renders the templates against every values file.

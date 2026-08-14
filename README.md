@@ -477,7 +477,8 @@ excluded from the default run:
 cargo test --features integration-tests
 ```
 
-These are not currently run in CI; they need a broker and a database available.
+These run in CI against RabbitMQ and PostgreSQL service containers. See
+[CONTRIBUTING.md](CONTRIBUTING.md#checks) for running them locally.
 
 ### Building
 

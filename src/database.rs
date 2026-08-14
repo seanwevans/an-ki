@@ -68,28 +68,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic_query() {
-        let pool = match get_pool().await {
-            Ok(pool) => pool,
-            Err(e) => panic!("Failed to create pool: {}", e),
-        };
-        let conn = match pool.get().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                eprintln!(
-                    "Skipping test_basic_query: failed to get connection from pool: {}",
-                    e
-                );
-                return;
-            }
-        };
-        let row = match conn.query_one("SELECT 1", &[]).await {
-            Ok(row) => row,
-            Err(e) => {
-                eprintln!("Skipping test_basic_query: query failed: {}", e);
-                return;
-            }
-        };
+        // Previously this skipped itself when the database was unreachable,
+        // which made an unreachable database indistinguishable from a passing
+        // test. The suite is gated behind `integration-tests` precisely because
+        // it requires a database, so not having one is a failure.
+        let pool = get_pool().await.expect("connect to the database");
+        let conn = pool.get().await.expect("take a connection from the pool");
+        let row = conn.query_one("SELECT 1", &[]).await.expect("run a query");
+
         let value: i32 = row.get(0);
         assert_eq!(value, 1);
+    }
+
+    #[tokio::test]
+    async fn migrations_create_every_table_the_code_reads() {
+        // `get_pool` runs the migrations, so reaching these tables proves they
+        // exist with the columns the queries name.
+        let pool = get_pool().await.expect("connect to the database");
+        let conn = pool.get().await.expect("connection");
+
+        conn.query_opt("SELECT task_id, task_type, data FROM tasks LIMIT 1", &[])
+            .await
+            .expect("tasks table is queryable");
+        conn.query_opt(
+            "SELECT checkpoint_id, model_id, epoch, parameters, loss \
+             FROM model_checkpoints LIMIT 1",
+            &[],
+        )
+        .await
+        .expect("model_checkpoints table is queryable");
     }
 }
