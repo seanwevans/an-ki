@@ -1,0 +1,59 @@
+{{- /*
+The principal keeps the Raft log and state machine on local disk, so it needs a
+stable identity and storage that outlives the pod. A Deployment gives neither:
+rescheduling would hand the principal an empty log and it would re-initialize as
+a brand new single-member cluster, silently discarding committed state.
+*/ -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: principal
+spec:
+  serviceName: principal-headless
+  replicas: {{ .Values.principal.replicas }}
+  selector:
+    matchLabels:
+      app: principal
+  template:
+    metadata:
+      labels:
+        app: principal
+    spec:
+      containers:
+        - name: principal
+          image: {{ .Values.global.imageRepository }}:{{ .Values.global.imageTag }}
+          # The StatefulSet ordinal is the natural source of a stable Raft node
+          # id. Raft ids start at 1 here so that 0 never appears as an id.
+          command:
+            - /bin/sh
+            - -c
+            - 'export RAFT_NODE_ID=$(( ${HOSTNAME##*-} + 1 )); exec an-ki principal'
+          env:
+            - name: AMQP_ADDR
+              value: {{ .Values.global.amqpAddr | quote }}
+            - name: JWT_SECRET_KEY
+              value: {{ .Values.global.jwtSecretKey | quote }}
+            - name: DATABASE_URL
+              value: {{ .Values.global.databaseUrl | quote }}
+            - name: NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: RAFT_DATA_DIR
+              value: {{ .Values.principal.raftDataDir | quote }}
+          ports:
+            - containerPort: 3030
+          volumeMounts:
+            - name: raft-data
+              mountPath: {{ .Values.principal.raftDataDir | quote }}
+  volumeClaimTemplates:
+    - metadata:
+        name: raft-data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        {{- with .Values.principal.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.principal.raftDataSize | quote }}

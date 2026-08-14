@@ -22,7 +22,7 @@ pub struct Task {
     pub data: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum NodeRole {
     Principal,
     An,

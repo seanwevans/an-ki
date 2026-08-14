@@ -7,6 +7,12 @@ global:
 
 principal:
   replicas: 1
+  # Where the Raft log and state machine are stored inside the container. This
+  # path is backed by a per-replica PersistentVolumeClaim.
+  raftDataDir: /var/lib/an-ki/raft
+  raftDataSize: 1Gi
+  # Leave empty to use the cluster's default StorageClass.
+  storageClassName: ""
 
 an:
   replicas: 1

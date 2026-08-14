@@ -77,6 +77,32 @@ node that dies disappears on its own.
 | `CLUSTER_REPORT_INTERVAL_MS` | `60000` | How often the principal logs the cluster view |
 
 
+### Replicated Cluster State
+
+The principal's authoritative state — which role each node is assigned, and
+cluster-wide configuration overrides — lives in the Raft log rather than in one
+process's memory. Every change is a `ClusterRequest` entry
+(`AssignRole`, `ClearRole`, `SetConfig`) that is committed through Raft and then
+folded into the state machine, so each principal derives the same state from the
+same log.
+
+The log, the state machine, and the vote are persisted to a local `sled`
+database under `RAFT_DATA_DIR` (default `data/raft`, with a per-node
+subdirectory named after `RAFT_NODE_ID`). Writes Raft cannot afford to lose —
+the vote and appended entries — are flushed before the storage call returns. A
+principal that restarts reloads its log and resumes the existing cluster instead
+of re-initializing as a fresh one.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `RAFT_NODE_ID` | `1` | This principal's numeric Raft id; must be unique per principal |
+| `RAFT_DATA_DIR` | `data/raft` | Directory holding the Raft log and state machine |
+
+Because this state is on disk, the Helm chart runs the principal as a
+`StatefulSet` with a per-replica `PersistentVolumeClaim` and derives
+`RAFT_NODE_ID` from the pod ordinal. Running it as a `Deployment` on ephemeral
+storage would hand a rescheduled principal an empty log.
+
 ## Getting Started
 
 ### Prerequisites
