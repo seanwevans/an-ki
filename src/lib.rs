@@ -8,6 +8,7 @@ pub mod health;
 pub mod ki_node;
 pub mod logging_metrics;
 pub mod messaging;
+pub mod model;
 pub mod network;
 pub mod node_registry;
 pub mod principal;
