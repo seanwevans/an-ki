@@ -1,11 +1,9 @@
 pub mod an_node;
 pub mod api;
-pub mod backup;
 pub mod common;
 pub mod config;
 pub mod database;
 pub mod dht;
-pub mod election;
 pub mod error;
 pub mod health;
 pub mod ki_node;
@@ -20,4 +18,3 @@ pub mod scheduler;
 pub mod security;
 pub mod signals;
 pub mod task_recovery;
-pub mod validation;
