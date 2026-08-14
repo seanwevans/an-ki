@@ -7,7 +7,7 @@ use crate::{
     api,
     common::{self, Task, TaskType},
     config::load_settings,
-    health, messaging, scheduler, security, signals,
+    health, logging_metrics, messaging, scheduler, security, signals,
 };
 use futures_util::stream::StreamExt;
 use lapin::{
@@ -15,6 +15,7 @@ use lapin::{
     Channel,
 };
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -345,11 +346,15 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                             match serde_json::from_slice::<Task>(&delivery.data) {
                                 Ok(task_message) => {
                                     info!("Received task: {:?}", task_message);
+                                    let started_at = Instant::now();
                                     let outcome = state
                                         .lock()
                                         .await
                                         .process_task(task_message, Some(&channel), shard_count)
                                         .await;
+                                    if outcome.is_ok() {
+                                        logging_metrics::record_task_processed(started_at);
+                                    }
                                     match outcome {
                                         Ok(()) => {
                                             match processing_disposition(ProcessingOutcome::Succeeded) {

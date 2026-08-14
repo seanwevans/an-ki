@@ -23,21 +23,20 @@ async fn main() {
 
     match node_type.as_str() {
         "principal" => {
-            logging_metrics::set_consensus_state(1.0);
+            // consensus_state is reported by the principal's Raft node itself,
+            // from real leadership, rather than assumed from the CLI argument.
             if let Err(e) = principal::run().await {
                 error!("Failed to run principal node: {:?}", e);
                 std::process::exit(1);
             }
         }
         "an" => {
-            logging_metrics::set_consensus_state(0.0);
             if let Err(e) = an_node::run().await {
                 error!("Failed to run an node: {:?}", e);
                 std::process::exit(1);
             }
         }
         "ki" => {
-            logging_metrics::set_consensus_state(0.0);
             if let Err(e) = ki_node::run().await {
                 error!("Failed to run ki node: {:?}", e);
                 std::process::exit(1);

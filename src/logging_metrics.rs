@@ -84,11 +84,30 @@ pub fn set_consensus_state(state: f64) {
     CONSENSUS_STATE.set(state);
 }
 
-pub fn log_task_processing(start_time: Instant) {
-    let elapsed = start_time.elapsed();
+/// Records that one task finished, feeding both `tasks_processed_total` and
+/// the `task_processing_seconds` histogram.
+///
+/// Call this on every completed task on every node type: the Grafana dashboard
+/// charts `rate(tasks_processed_total[1m])` as cluster-wide throughput, so a
+/// node that processes tasks without recording them makes the panel understate
+/// the cluster rather than merely omitting one series.
+pub fn record_task_processed(started_at: Instant) {
+    let elapsed = started_at.elapsed();
     PROCESSING_TIME.observe(elapsed.as_secs_f64());
     TASKS_PROCESSED.inc();
-    debug!("Task processed in {:?} seconds.", elapsed);
+    debug!("Task processed in {:?}.", elapsed);
+}
+
+/// Current value of `tasks_processed_total`, for assertions in tests.
+#[cfg(test)]
+pub fn tasks_processed_total() -> f64 {
+    TASKS_PROCESSED.get()
+}
+
+/// Current value of `consensus_state`, for assertions in tests.
+#[cfg(test)]
+pub fn consensus_state() -> f64 {
+    CONSENSUS_STATE.get()
 }
 
 pub async fn metrics_endpoint() -> Result<impl warp::Reply, Infallible> {
@@ -132,8 +151,15 @@ mod tests {
     }
 
     #[test]
-    fn test_log_task_processing() {
-        let start_time = Instant::now() - Duration::from_millis(50);
-        log_task_processing(start_time);
+    fn recording_a_task_advances_the_throughput_counter() {
+        // The Grafana dashboard charts `rate(tasks_processed_total[1m])`, so a
+        // counter that never moves renders as a permanently flat line. The
+        // counter is process-wide, so assert on the delta rather than an
+        // absolute value.
+        let before = tasks_processed_total();
+
+        record_task_processed(Instant::now() - Duration::from_millis(50));
+
+        assert_eq!(tasks_processed_total(), before + 1.0);
     }
 }

@@ -4,6 +4,7 @@
 use crate::common::{self, Task, TaskType};
 use crate::config::load_settings;
 use crate::health;
+use crate::logging_metrics;
 use crate::messaging;
 use crate::security;
 use crate::signals;
@@ -14,6 +15,7 @@ use lapin::{
 };
 use std::error::Error;
 use std::io::{Error as IoError, ErrorKind};
+use std::time::Instant;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -322,8 +324,13 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 }
 
 async fn process_and_send_task(task: Task, channel: &Channel) -> Result<(), Box<dyn Error>> {
+    let started_at = Instant::now();
     let result = perform_computation(task).await?;
-    send_result(result, channel).await
+    send_result(result, channel).await?;
+    // Only successful tasks are counted: a task that failed was not processed,
+    // and counting it would inflate the throughput panel during an outage.
+    logging_metrics::record_task_processed(started_at);
+    Ok(())
 }
 
 pub async fn perform_computation(task: Task) -> Result<Task, Box<dyn Error>> {
