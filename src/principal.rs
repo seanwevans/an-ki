@@ -1,7 +1,9 @@
 // principal.rs: Implements the specific responsibilities of the Principal, including role management and global coordination.
 
+use crate::common::NodeRole;
 use crate::health;
 use crate::messaging::{consume_messages, declare_queue};
+use crate::node_registry::{self, NodeRegistry};
 use crate::raft_node;
 use crate::signals;
 
@@ -91,13 +93,21 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         .map_err(Box::<dyn Error>::from)?;
 
     // Monitor cluster health by consuming node heartbeats on a dedicated channel.
+    // The same heartbeats populate the node registry, which is the principal's
+    // live view of who is in the cluster and what role each node serves.
+    let registry = NodeRegistry::new();
     let health_cancel = CancellationToken::new();
     match connection.create_channel().await {
         Ok(health_channel) => {
             let threshold = health::unhealthy_threshold();
+            let ttl = node_registry::node_ttl();
             let token = health_cancel.clone();
+            let registry = registry.clone();
             tokio::spawn(async move {
-                if let Err(e) = health::run_health_monitor(health_channel, threshold, token).await {
+                if let Err(e) =
+                    health::run_health_monitor(health_channel, registry, threshold, ttl, token)
+                        .await
+                {
                     error!("Health monitor exited with error: {:?}", e);
                 }
             });
@@ -122,11 +132,16 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     info!("Principal node is running and waiting for update requests...");
 
+    let mut cluster_report = tokio::time::interval(node_registry::cluster_report_interval());
+
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => {
                 info!("Shutdown signal received, stopping Principal node...");
                 break;
+            }
+            _ = cluster_report.tick() => {
+                log_cluster_view(&registry).await;
             }
             delivery_result = consumer.next() => {
                 match delivery_result {
@@ -182,6 +197,34 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     }
 
     Ok(())
+}
+
+/// Logs the current cluster composition so operators can see which nodes the
+/// principal believes are alive without attaching a debugger.
+async fn log_cluster_view(registry: &NodeRegistry) {
+    let nodes = registry.list_nodes().await;
+    if nodes.is_empty() {
+        info!("Cluster view: no nodes have heartbeated yet");
+        return;
+    }
+
+    let mut an = 0usize;
+    let mut ki = 0usize;
+    let mut principal = 0usize;
+    for node in &nodes {
+        match node.role {
+            NodeRole::An => an += 1,
+            NodeRole::Ki => ki += 1,
+            NodeRole::Principal => principal += 1,
+        }
+    }
+    info!(
+        "Cluster view: {} node(s) alive ({} an, {} ki, {} principal)",
+        nodes.len(),
+        an,
+        ki,
+        principal
+    );
 }
 
 async fn process_update_request(update: UpdateRequest) -> Result<(), Box<dyn Error>> {

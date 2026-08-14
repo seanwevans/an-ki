@@ -31,7 +31,10 @@ pub enum NodeRole {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeInfo {
-    pub id: Uuid,
+    /// Identity the node heartbeats under — see [`node_id`]. This is a free-form
+    /// string rather than a [`Uuid`] because `NODE_ID` is typically set to
+    /// something meaningful to the orchestrator, such as a Kubernetes pod name.
+    pub id: String,
     pub address: Option<String>,
     pub last_seen: Option<DateTime<Utc>>,
     pub role: NodeRole,
@@ -75,7 +78,7 @@ mod tests {
     fn node_info_round_trips_through_json() {
         let now = Utc::now();
         let info = NodeInfo {
-            id: Uuid::new_v4(),
+            id: "an-0".to_string(),
             address: Some("127.0.0.1:3030".to_string()),
             last_seen: Some(now),
             role: NodeRole::An,

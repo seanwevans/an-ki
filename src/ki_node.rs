@@ -150,6 +150,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     tokio::spawn(health::publish_heartbeats(
         amqp_addr.clone(),
         common::node_id(),
+        common::NodeRole::Ki,
         health::heartbeat_interval(),
         heartbeat_cancel,
     ));
