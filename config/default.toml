@@ -22,3 +22,5 @@ dataset_samples = 512
 dataset_seed = 20260814
 # Seed for the initial parameters.
 init_seed = 7
+# Epochs between model checkpoints. Zero disables checkpointing.
+checkpoint_interval_epochs = 25

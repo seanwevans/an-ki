@@ -1,5 +1,6 @@
 pub mod an_node;
 pub mod api;
+pub mod checkpoint;
 pub mod common;
 pub mod config;
 pub mod database;

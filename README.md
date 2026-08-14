@@ -190,6 +190,25 @@ completes.
 | `init_seed` | `7` | Seed for the initial parameters |
 | `training_epochs` | `400` | Epochs to dispatch before the scheduler stops |
 | `epoch_interval_ms` | `100` | Delay between epochs |
+| `checkpoint_interval_epochs` | `25` | Epochs between checkpoints; `0` disables them |
+
+### Checkpoints
+
+Every `checkpoint_interval_epochs` the An node writes the current parameters to
+the `model_checkpoints` table, and on startup it restores the most recent
+checkpoint instead of starting from `init_seed`. Without this a restart would
+discard the entire training run.
+
+Checkpoints are keyed by a fingerprint of the network shape and the dataset, so
+changing `hidden_units`, `dataset_samples`, or `dataset_seed` starts a fresh run
+rather than resuming into a parameter vector that no longer fits.
+
+Parameters are encrypted at rest with the same shared secret used for inter-node
+messages: a checkpoint is the entire product of the cluster's work and should not
+be plaintext to anything holding a database connection.
+
+Checkpointing is best-effort. A database that is unavailable stops the node
+remembering its progress, not training.
 
 Each worker computes a real gradient: it rebuilds the shared dataset from its
 seed, takes only its own shard, runs the forward and backward passes, and

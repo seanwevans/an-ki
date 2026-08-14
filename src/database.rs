@@ -21,6 +21,12 @@ async fn run_migrations(pool: &PgPool) -> Result<(), Box<dyn Error + Send + Sync
     ))
     .await?;
 
+    // Reshaped to fit training checkpoints rather than REST API tasks.
+    conn.batch_execute(include_str!(
+        "../migrations/003_reshape_model_checkpoints.sql"
+    ))
+    .await?;
+
     Ok(())
 }
 

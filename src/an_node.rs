@@ -4,9 +4,10 @@ use std::error::Error;
 use std::io::{Error as IoError, ErrorKind};
 
 use crate::{
-    api,
+    api, checkpoint,
     common::{self, GradientReply, Task, TaskType},
     config::load_settings,
+    database,
     dataset::DatasetSpec,
     health, logging_metrics, messaging,
     model::MlpSpec,
@@ -135,6 +136,34 @@ impl AnNodeState {
             last_epoch_loss: None,
             epochs_completed: 0,
         }
+    }
+
+    /// Resumes from a previously saved checkpoint, replacing the freshly
+    /// initialized parameters and continuing the epoch count.
+    ///
+    /// # Errors
+    /// Returns an error if the checkpoint's parameter vector does not match the
+    /// configured network shape, which would otherwise corrupt every subsequent
+    /// gradient application.
+    pub fn resume_from(
+        &mut self,
+        parameters: Vec<f32>,
+        epochs_completed: u64,
+    ) -> Result<(), Box<dyn Error>> {
+        if parameters.len() != self.parameters.len() {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "checkpoint has {} parameters, model expects {}",
+                    parameters.len(),
+                    self.parameters.len()
+                ),
+            )
+            .into());
+        }
+        self.parameters = parameters;
+        self.epochs_completed = epochs_completed;
+        Ok(())
     }
 
     /// The current model parameters.
@@ -284,6 +313,42 @@ impl AnNodeState {
     }
 }
 
+/// Saves a checkpoint when one is due, at most once per completed epoch.
+///
+/// Failures are logged and swallowed: losing a checkpoint costs progress, but
+/// aborting the training loop over it costs more.
+async fn maybe_checkpoint(
+    store: Option<&checkpoint::CheckpointStore>,
+    run_id: &str,
+    state: &Arc<Mutex<AnNodeState>>,
+    interval: u64,
+    last_saved: &mut u64,
+) {
+    let Some(store) = store else {
+        return;
+    };
+
+    let (epoch, parameters, loss) = {
+        let state = state.lock().await;
+        (
+            state.epochs_completed(),
+            state.parameters().to_vec(),
+            state.last_epoch_loss(),
+        )
+    };
+
+    if epoch == *last_saved || !checkpoint::is_checkpoint_due(epoch, interval) {
+        return;
+    }
+
+    match store.save(run_id, epoch, &parameters, loss).await {
+        Ok(_) => *last_saved = epoch,
+        // Do not advance `last_saved` on failure, so the next completed epoch
+        // retries rather than waiting a full interval.
+        Err(e) => error!("Failed to save checkpoint at epoch {}: {:?}", epoch, e),
+    }
+}
+
 pub async fn run() -> Result<(), Box<dyn Error>> {
     #[cfg(unix)]
     if let Err(e) = signals::setup_unix_signal_handlers().await {
@@ -307,13 +372,50 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     // The scheduler dispatches the current parameters each epoch, so the model
     // needs a shape before the first round rather than being inferred from the
     // first gradient to arrive.
-    let state = Arc::new(Mutex::new(AnNodeState::new(
-        settings.model_spec(),
-        settings.dataset_spec(),
+    let model_spec = settings.model_spec();
+    let dataset_spec = settings.dataset_spec();
+    let run_id = checkpoint::model_id(&model_spec, &dataset_spec);
+    let mut state_value = AnNodeState::new(
+        model_spec,
+        dataset_spec,
         shard_count,
         settings.learning_rate,
         settings.init_seed,
-    )));
+    );
+
+    // Restore the last checkpoint so a restart resumes training rather than
+    // discarding it. Checkpointing is best-effort: a database that is
+    // unavailable must not stop the node from training, only from remembering.
+    let checkpoints = match database::get_pool().await {
+        Ok(pool) => match checkpoint::CheckpointStore::new(pool) {
+            Ok(store) => {
+                match store.latest(&run_id, model_spec.parameter_count()).await {
+                    Ok(Some(saved)) => {
+                        match state_value.resume_from(saved.parameters, saved.epoch) {
+                            Ok(()) => info!(
+                                "Resumed {} from checkpoint at epoch {} (loss {:?})",
+                                run_id, saved.epoch, saved.loss
+                            ),
+                            Err(e) => error!("Ignoring incompatible checkpoint: {:?}", e),
+                        }
+                    }
+                    Ok(None) => info!("No checkpoint for {}; starting from the seed", run_id),
+                    Err(e) => error!("Could not read checkpoints: {:?}", e),
+                }
+                Some(store)
+            }
+            Err(e) => {
+                error!("Checkpointing disabled: {:?}", e);
+                None
+            }
+        },
+        Err(e) => {
+            error!("Checkpointing disabled, no database connection: {:?}", e);
+            None
+        }
+    };
+
+    let state = Arc::new(Mutex::new(state_value));
 
     // Serve the task REST API alongside the consumer loop. The server creates
     // its own database-backed task manager and shuts down on the same signal.
@@ -361,6 +463,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let queue_name = "an_task_queue";
     let consumer_tag = "an_consumer";
+    let mut last_checkpointed_epoch = 0_u64;
 
     loop {
         let (channel, mut consumer) = messaging::connect_with_retries(
@@ -425,6 +528,14 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                         .await;
                                     if outcome.is_ok() {
                                         logging_metrics::record_task_processed(started_at);
+                                        maybe_checkpoint(
+                                            checkpoints.as_ref(),
+                                            &run_id,
+                                            &state,
+                                            settings.checkpoint_interval_epochs,
+                                            &mut last_checkpointed_epoch,
+                                        )
+                                        .await;
                                     }
                                     match outcome {
                                         Ok(()) => {
@@ -684,6 +795,31 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("zero samples"));
+    }
+
+    #[tokio::test]
+    async fn resuming_replaces_the_parameters_and_continues_the_epoch_count() {
+        let mut state = test_state(1);
+        let restored: Vec<f32> = (0..state.parameters().len()).map(|i| i as f32).collect();
+
+        state.resume_from(restored.clone(), 125).expect("resume");
+
+        assert_eq!(state.parameters(), &restored[..]);
+        assert_eq!(state.epochs_completed(), 125);
+    }
+
+    #[tokio::test]
+    async fn a_checkpoint_of_the_wrong_shape_is_refused() {
+        // Loading a mismatched vector would corrupt every gradient applied to
+        // it afterwards, so it must not silently succeed.
+        let mut state = test_state(1);
+        let before = state.parameters().to_vec();
+
+        let err = state.resume_from(vec![0.0; 3], 10).unwrap_err();
+
+        assert!(err.to_string().contains("checkpoint has 3 parameters"));
+        assert_eq!(state.parameters(), &before[..]);
+        assert_eq!(state.epochs_completed(), 0);
     }
 
     #[tokio::test]
