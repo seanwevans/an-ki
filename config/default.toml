@@ -11,3 +11,7 @@ otlp_endpoint = "http://localhost:4317"
 api_addr = "0.0.0.0:3030"
 model_shards = 1
 training_epochs = 10
+# Length of the model parameter vector the scheduler dispatches each epoch.
+model_dimension = 8
+# Milliseconds between training epochs.
+epoch_interval_ms = 1000

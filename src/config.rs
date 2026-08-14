@@ -20,6 +20,22 @@ pub struct Settings {
     pub model_shards: usize,
     /// Number of training epochs the scheduler should execute.
     pub training_epochs: u32,
+    /// Length of the model parameter vector. The scheduler dispatches the
+    /// current parameters each epoch, so the model needs a shape before the
+    /// first gradient arrives.
+    #[serde(default = "default_model_dimension")]
+    pub model_dimension: usize,
+    /// Milliseconds between training epochs.
+    #[serde(default = "default_epoch_interval_ms")]
+    pub epoch_interval_ms: u64,
+}
+
+fn default_model_dimension() -> usize {
+    8
+}
+
+fn default_epoch_interval_ms() -> u64 {
+    1_000
 }
 
 impl Settings {
@@ -62,10 +78,28 @@ impl Settings {
         settings.validate()
     }
 
+    /// Interval between training epochs.
+    pub fn epoch_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.epoch_interval_ms)
+    }
+
     fn validate(self) -> Result<Self, ConfigError> {
         if self.model_shards == 0 {
             return Err(ConfigError::Message(
                 "model_shards must be greater than 0".into(),
+            ));
+        }
+        if self.model_dimension == 0 {
+            return Err(ConfigError::Message(
+                "model_dimension must be greater than 0".into(),
+            ));
+        }
+        // A zero interval would spin the scheduler as fast as the broker
+        // accepts publishes, drowning the Ki nodes in a round they cannot
+        // finish before the next one starts.
+        if self.epoch_interval_ms == 0 {
+            return Err(ConfigError::Message(
+                "epoch_interval_ms must be greater than 0".into(),
             ));
         }
         Ok(self)
@@ -141,6 +175,8 @@ mod tests {
             api_addr: api_addr.map(str::to_string),
             model_shards: 1,
             training_epochs: 1,
+            model_dimension: 8,
+            epoch_interval_ms: 1_000,
         }
     }
 

@@ -23,7 +23,7 @@ A distributed neural network project that supports task scheduling, load balanci
 
 ## Features
 
-- **Task Scheduling:** Efficient task assignment using a load balancer and asynchronous execution.
+- **Task Scheduling:** An nodes dispatch one task per model shard each epoch onto `ki_task_queue`; the broker distributes them across whichever Ki nodes are alive.
 - **Fault Tolerance:** Tasks are persisted to the database by the task recovery manager, so they survive a node restart and can be recovered by ID.
 - **Secure Communication:** JWT-based authentication and role-based access control on the REST API, plus AES-256-GCM encryption of model-update messages exchanged between nodes (keyed by `jwt_secret_key`).
 - **Dynamic Node Discovery:** The principal derives a live cluster view from node heartbeats — nodes join by heartbeating and are evicted after `NODE_TTL_MS` of silence. No separate registration step is required.
@@ -45,7 +45,9 @@ The system is composed of three main types of nodes:
 2. **An Nodes:** Handle task distribution to Ki nodes and manage communication with the principal.
 3. **Ki Nodes:** Execute tasks assigned by An nodes and report results back.
 
-Inter-node communication is facilitated via RabbitMQ, and tasks are scheduled using a load balancer to optimize resource utilization.
+Inter-node communication is facilitated via RabbitMQ. Because every Ki node
+consumes from the same `ki_task_queue`, the broker itself distributes shards
+across available workers — there is no separate load-balancing step.
 
 ### Health Monitoring and Node Discovery
 
@@ -157,6 +159,37 @@ Because this state is on disk, the Helm chart runs the principal as a
 from the pod ordinal, and builds `RAFT_PEERS` from the replica count against the
 headless service's per-pod DNS names. Running it as a `Deployment` on ephemeral
 storage would hand a rescheduled principal an empty log.
+
+### Training Rounds
+
+An nodes drive training. Each epoch the scheduler publishes `model_shards`
+tasks onto `ki_task_queue` carrying the current parameters. Every Ki node
+consumes from that queue, so the broker spreads the shards across whichever
+workers are alive.
+
+```
+An scheduler ──(model_shards tasks)──▶ ki_task_queue ──▶ Ki nodes
+                                                            │
+An node ◀────────(gradients)──────── an_task_queue ◀────────┘
+   │
+   └──(after model_shards gradients: average, update)──▶ ki_model_queue ──▶ Ki nodes
+```
+
+The shard count is load-bearing rather than a tuning knob: the An node
+accumulates gradients and only publishes an updated model once `model_shards`
+of them have arrived. A round that dispatches a different number never
+completes.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `model_shards` | `1` | Tasks dispatched per epoch, and gradients required to close a round |
+| `model_dimension` | `8` | Length of the parameter vector |
+| `training_epochs` | `10` | Epochs to dispatch before the scheduler stops |
+| `epoch_interval_ms` | `1000` | Delay between epochs |
+
+> **Note:** the per-shard computation is a placeholder — `perform_computation`
+> returns twice its input rather than a real gradient. What this wires up is the
+> distributed round trip, not a training algorithm.
 
 ## Getting Started
 

@@ -1,142 +1,272 @@
-//! Task scheduling for distributing work among Ki nodes.
+//! Drives training rounds by dispatching work to Ki nodes.
 //!
-//! The [`Scheduler`] coordinates training tasks by leveraging the [`LoadBalancer`]
-//! and dispatching work to available nodes according to the selected
-//! [`TrainingMode`].
+//! Each epoch the scheduler publishes one task per model shard onto
+//! `ki_task_queue`. Every Ki node consumes from that same queue, so the broker
+//! distributes the shards across whichever workers are alive — there is no
+//! routing decision to make here, only how much work to emit and when.
+//!
+//! The shard count matters for correctness, not just throughput: the An node
+//! accumulates gradients and only publishes an updated model once it has
+//! received `model_shards` of them. Emitting a different number per epoch would
+//! leave the round half-finished.
 
-use crate::common::{Task, TaskType};
-use crate::error::AnKiError;
-use crate::load_balancer::LoadBalancer;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+
+use lapin::Channel;
+use tokio::sync::Mutex;
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use uuid::Uuid;
 
-/// Specifies how the training tasks should be coordinated across nodes.
-#[derive(Clone, Copy)]
+use crate::an_node::AnNodeState;
+use crate::common::{Task, TaskType};
+use crate::error::AnKiError;
+use crate::messaging;
+
+/// Queue Ki nodes take their work from.
+pub const KI_TASK_QUEUE: &str = "ki_task_queue";
+
+/// How training rounds are coordinated across nodes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TrainingMode {
-    /// A central parameter server collects gradients and distributes updated parameters.
+    /// An nodes hold the parameters, Ki nodes return gradients against them.
+    #[default]
     ParameterServer,
-    /// Nodes perform an all-reduce operation to share gradients amongst themselves.
-    AllReduce,
 }
 
-/// Coordinates the distribution of [`Task`]s to worker nodes.
-pub struct Scheduler {
-    load_balancer: LoadBalancer,
-    task_tx: mpsc::Sender<Task>,
+/// Builds the tasks that make up one epoch.
+///
+/// Every shard receives the same starting parameters and returns a gradient; the
+/// An node averages them. Splitting the parameter vector per shard would be the
+/// data-parallel alternative, but the aggregation in
+/// [`AnNodeState::process_task`](crate::an_node::AnNodeState::process_task)
+/// averages equal-length gradients, so shards must span the whole vector.
+///
+/// # Errors
+/// Returns an error if `parameters` cannot be serialized, or if `shards` is zero
+/// — an epoch with no tasks would stall the round rather than complete it.
+pub fn epoch_tasks(
     mode: TrainingMode,
+    shards: usize,
+    parameters: &[f32],
+) -> Result<Vec<Task>, AnKiError> {
+    if shards == 0 {
+        return Err(AnKiError::Scheduler(
+            "model_shards must be greater than 0".into(),
+        ));
+    }
+
+    let data = serde_json::to_string(parameters)
+        .map_err(|e| AnKiError::Scheduler(format!("failed to serialize parameters: {e}")))?;
+
+    let task_type = match mode {
+        TrainingMode::ParameterServer => TaskType::GradientUpdate,
+    };
+
+    Ok((0..shards)
+        .map(|_| Task {
+            task_id: Uuid::new_v4(),
+            task_type: task_type.clone(),
+            data: data.clone(),
+        })
+        .collect())
+}
+
+/// Publishes training rounds onto [`KI_TASK_QUEUE`].
+pub struct Scheduler {
+    channel: Channel,
+    state: Arc<Mutex<AnNodeState>>,
+    mode: TrainingMode,
+    shards: usize,
     epochs: u32,
+    interval: Duration,
 }
 
 impl Scheduler {
-    /// Creates a new scheduler.
-    ///
-    /// # Parameters
-    /// * `load_balancer` - Component used to select target nodes.
-    /// * `task_tx` - Channel used to dispatch tasks.
-    /// * `mode` - Training coordination strategy.
-    /// * `epochs` - Number of iterations to run in [`run_scheduler`].
     pub fn new(
-        load_balancer: LoadBalancer,
-        task_tx: mpsc::Sender<Task>,
+        channel: Channel,
+        state: Arc<Mutex<AnNodeState>>,
         mode: TrainingMode,
+        shards: usize,
         epochs: u32,
+        interval: Duration,
     ) -> Self {
-        Scheduler {
-            load_balancer,
-            task_tx,
+        Self {
+            channel,
+            state,
             mode,
+            shards,
             epochs,
+            interval,
         }
     }
 
-    pub async fn schedule_task(&self, task: Task) -> Result<(), AnKiError> {
-        if let Some(node_id) = self.load_balancer.assign_task().await {
-            info!("Scheduling task {} to node {}", task.task_id, node_id);
-            self.task_tx.send(task).await.map_err(|e| {
-                error!("Failed to send task: {:?}", e);
-                AnKiError::Scheduler(e.to_string())
+    /// Publishes one epoch's worth of tasks, reading the current parameters so
+    /// each round starts from the model the previous round produced.
+    pub async fn dispatch_epoch(&self) -> Result<usize, AnKiError> {
+        let parameters = self.state.lock().await.parameters().to_vec();
+        let tasks = epoch_tasks(self.mode, self.shards, &parameters)?;
+
+        for task in &tasks {
+            let payload = serde_json::to_vec(task).map_err(|e| {
+                AnKiError::Scheduler(format!("failed to serialize task {}: {e}", task.task_id))
             })?;
-            Ok(())
-        } else {
-            error!("No available nodes to schedule task {}", task.task_id);
-            Err(AnKiError::Scheduler("No available nodes".into()))
+            messaging::publish_message(&self.channel, KI_TASK_QUEUE, &payload).await?;
         }
+
+        Ok(tasks.len())
     }
 
-    /// Runs the scheduler for a fixed number of `epochs`.
+    /// Runs `epochs` rounds `interval` apart, stopping early if `cancel` fires.
     ///
-    /// In [`TrainingMode::ParameterServer`] a `ParameterPull` task is broadcast to
-    /// all nodes so they can fetch the latest model. In
-    /// [`TrainingMode::AllReduce`] a `GradientUpdate` task instructs nodes to
-    /// compute gradients on their shard.
-    ///
-    /// # Parameters
-    /// * `interval` - Delay between task broadcasts.
-    pub async fn run_scheduler(&self, interval: Duration) {
-        let mut ticker = time::interval(interval);
-        for _ in 0..self.epochs {
-            ticker.tick().await;
-            let task_type = match self.mode {
-                TrainingMode::ParameterServer => TaskType::ParameterPull,
-                TrainingMode::AllReduce => TaskType::GradientUpdate,
-            };
-            let task = Task {
-                task_id: Uuid::new_v4(),
-                task_type,
-                data: String::new(),
-            };
-            if let Err(e) = self.broadcast_task(task).await {
-                error!("Failed to dispatch task: {:?}", e);
+    /// A failed epoch is logged and the round is skipped rather than aborting
+    /// the run: a transient broker error should not end training, and the An
+    /// node's accumulator tolerates a missed round because it only publishes a
+    /// model once a full set of gradients has arrived.
+    pub async fn run(&self, cancel: CancellationToken) {
+        if self.epochs == 0 {
+            info!("training_epochs is 0; scheduler has nothing to dispatch");
+            return;
+        }
+
+        if let Err(e) = messaging::declare_queue(&self.channel, KI_TASK_QUEUE).await {
+            error!("Scheduler cannot declare {}: {:?}", KI_TASK_QUEUE, e);
+            return;
+        }
+
+        let mut ticker = time::interval(self.interval);
+        info!(
+            "Scheduler dispatching {} epoch(s) of {} shard(s) every {:?}",
+            self.epochs, self.shards, self.interval
+        );
+
+        for epoch in 1..=self.epochs {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!("Scheduler stopped after {} epoch(s)", epoch - 1);
+                    return;
+                }
+                _ = ticker.tick() => {
+                    match self.dispatch_epoch().await {
+                        Ok(count) => info!("Dispatched epoch {}/{} ({} tasks)", epoch, self.epochs, count),
+                        Err(e) => error!("Epoch {} failed to dispatch: {:?}", epoch, e),
+                    }
+                }
             }
         }
-    }
 
-    /// Sends a task to every node managed by the scheduler.
-    async fn broadcast_task(&self, task: Task) -> Result<(), AnKiError> {
-        let nodes = self.load_balancer.nodes.read().await;
-        for info in nodes.values() {
-            info!(
-                "Broadcasting task {} to node {}",
-                task.task_id, info.node_id
-            );
-            self.task_tx.send(task.clone()).await.map_err(|e| {
-                error!("Failed to send task: {:?}", e);
-                AnKiError::Scheduler(e.to_string())
-            })?;
-        }
-        Ok(())
+        info!("Scheduler completed {} epoch(s)", self.epochs);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::load_balancer::LoadBalancer;
-    use tokio::sync::mpsc;
+
+    #[test]
+    fn an_epoch_emits_one_task_per_shard() {
+        let tasks = epoch_tasks(TrainingMode::ParameterServer, 3, &[0.5, 1.5]).expect("tasks");
+
+        assert_eq!(tasks.len(), 3);
+        for task in &tasks {
+            assert_eq!(task.task_type, TaskType::GradientUpdate);
+            let payload: Vec<f32> = serde_json::from_str(&task.data).expect("payload decodes");
+            assert_eq!(payload, vec![0.5, 1.5]);
+        }
+    }
+
+    #[test]
+    fn every_task_in_an_epoch_gets_its_own_id() {
+        let tasks = epoch_tasks(TrainingMode::ParameterServer, 4, &[0.0]).expect("tasks");
+
+        let mut ids: Vec<_> = tasks.iter().map(|task| task.task_id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "duplicate task ids would confuse recovery");
+    }
+
+    #[test]
+    fn zero_shards_is_refused_rather_than_producing_an_empty_epoch() {
+        // An empty epoch would publish nothing, so the An node would wait
+        // forever for gradients that were never requested.
+        let err = epoch_tasks(TrainingMode::ParameterServer, 0, &[1.0]).expect_err("must fail");
+        assert!(err.to_string().contains("model_shards"));
+    }
+
+    #[test]
+    fn an_empty_parameter_vector_still_produces_decodable_tasks() {
+        let tasks = epoch_tasks(TrainingMode::ParameterServer, 1, &[]).expect("tasks");
+        let payload: Vec<f32> = serde_json::from_str(&tasks[0].data).expect("payload decodes");
+        assert!(payload.is_empty());
+    }
+
+    /// The whole point of the scheduler: a round it dispatches must be
+    /// consumable by a Ki node and aggregate into a model update on the An node.
+    ///
+    /// This drives the real functions from all three stages — scheduler,
+    /// `ki_node::perform_computation`, `AnNodeState::process_task` — and only
+    /// leaves out the broker in the middle, so it catches payload-shape
+    /// mismatches between the stages. Those are exactly the breakages that kept
+    /// this loop from ever running: the previous scheduler emitted
+    /// `data: String::new()`, which `perform_computation` cannot parse.
+    #[tokio::test]
+    async fn a_dispatched_epoch_flows_through_ki_and_updates_the_model() {
+        use crate::ki_node;
+
+        let shards = 3;
+        let initial = vec![1.0_f32, -2.0_f32];
+        let mut an_state = AnNodeState::with_parameters(initial.clone());
+
+        let tasks = epoch_tasks(TrainingMode::ParameterServer, shards, &initial).expect("tasks");
+        assert_eq!(tasks.len(), shards);
+
+        for task in tasks {
+            // Ki side: compute the gradient for this shard.
+            let result = ki_node::perform_computation(task)
+                .await
+                .expect("ki computes a gradient");
+            // An side: accumulate it. No channel, so no broadcast is attempted.
+            an_state
+                .process_task(result, None, shards)
+                .await
+                .expect("an node accepts the gradient");
+        }
+
+        // Placeholder compute returns 2x the input, so each shard's gradient is
+        // [2, -4]; averaging `shards` of them and subtracting leaves [-1, 2].
+        assert_eq!(an_state.parameters(), &[-1.0_f32, 2.0_f32]);
+        assert_eq!(
+            an_state.pending_gradients(),
+            0,
+            "a completed round must reset the accumulator for the next epoch"
+        );
+    }
 
     #[tokio::test]
-    async fn test_schedule_task() {
-        let load_balancer = LoadBalancer::new();
-        let (task_tx, mut task_rx) = mpsc::channel(10);
-        let scheduler = Scheduler::new(
-            load_balancer.clone(),
-            task_tx,
-            TrainingMode::ParameterServer,
-            1,
+    async fn a_partial_epoch_leaves_the_model_untouched() {
+        use crate::ki_node;
+
+        let shards = 3;
+        let initial = vec![1.0_f32];
+        let mut an_state = AnNodeState::with_parameters(initial.clone());
+        let tasks = epoch_tasks(TrainingMode::ParameterServer, shards, &initial).expect("tasks");
+
+        // Deliver only two of the three shards.
+        for task in tasks.into_iter().take(2) {
+            let result = ki_node::perform_computation(task).await.expect("gradient");
+            an_state
+                .process_task(result, None, shards)
+                .await
+                .expect("ok");
+        }
+
+        assert_eq!(
+            an_state.parameters(),
+            &initial[..],
+            "the model must not move until a full round has arrived"
         );
-
-        load_balancer.add_node(Uuid::new_v4()).await;
-        let task = Task {
-            task_id: Uuid::new_v4(),
-            task_type: TaskType::ParameterPull,
-            data: "Test data".to_string(),
-        };
-
-        scheduler.schedule_task(task.clone()).await.unwrap();
-        let received_task = task_rx.recv().await.unwrap();
-        assert_eq!(received_task.task_id, task.task_id);
+        assert_eq!(an_state.pending_gradients(), 2);
     }
 }

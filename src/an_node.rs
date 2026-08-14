@@ -7,14 +7,15 @@ use crate::{
     api,
     common::{self, Task, TaskType},
     config::load_settings,
-    health, messaging, security, signals,
+    health, messaging, scheduler, security, signals,
 };
 use futures_util::stream::StreamExt;
 use lapin::{
     options::{BasicAckOptions, BasicNackOptions},
     Channel,
 };
-use tokio::sync::watch;
+use std::sync::Arc;
+use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use uuid::Uuid;
@@ -94,6 +95,27 @@ pub struct AnNodeState {
 impl AnNodeState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Starts from a known parameter vector. The scheduler dispatches the
+    /// current parameters each epoch, so the model needs a shape before the
+    /// first round rather than being inferred from the first gradient.
+    pub fn with_parameters(parameters: Vec<f32>) -> Self {
+        Self {
+            model_params: parameters,
+            grad_accum: (Vec::new(), 0),
+        }
+    }
+
+    /// The current model parameters.
+    pub fn parameters(&self) -> &[f32] {
+        &self.model_params
+    }
+
+    /// How many gradients have arrived toward the current round. Reaching the
+    /// shard count is what triggers a model update and broadcast.
+    pub fn pending_gradients(&self) -> usize {
+        self.grad_accum.1
     }
 
     pub async fn process_task(
@@ -211,7 +233,13 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     })?;
     let amqp_addr = settings.amqp_addr.clone();
     let shard_count = settings.model_shards;
-    let mut state = AnNodeState::new();
+    // The scheduler dispatches the current parameters each epoch, so the model
+    // needs a shape before the first round rather than being inferred from the
+    // first gradient to arrive.
+    let state = Arc::new(Mutex::new(AnNodeState::with_parameters(vec![
+        0.0;
+        settings.model_dimension
+    ])));
 
     // Serve the task REST API alongside the consumer loop. The server creates
     // its own database-backed task manager and shuts down on the same signal.
@@ -271,12 +299,44 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         )
         .await?;
 
+        // Drive training rounds onto ki_task_queue. Without this nothing ever
+        // publishes there, so the Ki nodes sit idle and no round completes.
+        // The scheduler gets its own channel so a slow publish cannot block the
+        // consumer loop that feeds it results.
+        let scheduler_cancel = CancellationToken::new();
+        match messaging::establish_connection(&amqp_addr).await {
+            Ok(scheduler_channel) => {
+                let scheduler = scheduler::Scheduler::new(
+                    scheduler_channel,
+                    Arc::clone(&state),
+                    scheduler::TrainingMode::default(),
+                    shard_count,
+                    settings.training_epochs,
+                    settings.epoch_interval(),
+                );
+                let token = scheduler_cancel.clone();
+                let mut scheduler_shutdown = shutdown_rx.clone();
+                tokio::spawn(async move {
+                    let _ = scheduler_shutdown.changed().await;
+                    token.cancel();
+                });
+                let token = scheduler_cancel.clone();
+                tokio::spawn(async move { scheduler.run(token).await });
+            }
+            Err(e) => error!(
+                "Scheduler could not open a publish channel; no training rounds \
+                 will be dispatched from this node: {:?}",
+                e
+            ),
+        }
+
         info!("An node is running and waiting for tasks...");
 
         loop {
             tokio::select! {
                 _ = shutdown_rx.changed() => {
                     info!("Shutdown signal received, stopping An node...");
+                    scheduler_cancel.cancel();
                     return Ok(());
                 }
                 delivery = consumer.next() => {
@@ -285,10 +345,12 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                             match serde_json::from_slice::<Task>(&delivery.data) {
                                 Ok(task_message) => {
                                     info!("Received task: {:?}", task_message);
-                                    match state
-                                        .process_task(task_message, Some(&channel), shard_count)
+                                    let outcome = state
+                                        .lock()
                                         .await
-                                    {
+                                        .process_task(task_message, Some(&channel), shard_count)
+                                        .await;
+                                    match outcome {
                                         Ok(()) => {
                                             match processing_disposition(ProcessingOutcome::Succeeded) {
                                                 DeliveryDisposition::Ack => {
