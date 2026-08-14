@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the network shape and dataset, so a configuration change starts a fresh run
   rather than resuming into a mismatched parameter vector.
 
+### Fixed
+
+- Opening the Raft store now retries briefly on I/O failure. sled holds an
+  exclusive directory lock that is released when the previous handle drops, so a
+  container restarting promptly could race the departing process and fail to
+  start over a lock that was about to be released. Corruption and unsupported
+  formats still fail immediately.
+
 ### Changed
 
 - Ki nodes return a `GradientReply` carrying the mean gradient, the loss, and
