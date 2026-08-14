@@ -1,9 +1,11 @@
 // principal.rs: Implements the specific responsibilities of the Principal, including role management and global coordination.
 
+use crate::common::NodeRole;
 use crate::health;
 use crate::messaging::{consume_messages, declare_queue};
 use crate::raft_network;
-use crate::raft_node;
+use crate::raft_node::{self, AnKiRaft};
+use crate::raft_store::ClusterRequest;
 use crate::signals;
 
 use crate::config::load_settings;
@@ -11,19 +13,35 @@ use futures_util::stream::StreamExt;
 use lapin::{
     message::Delivery,
     options::{BasicAckOptions, BasicNackOptions},
-    Channel, Connection, ConnectionProperties,
+    Connection, ConnectionProperties,
 };
+use openraft::error::{ClientWriteError, RaftError};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
-#[derive(Serialize, Deserialize, Debug)]
+/// A change to cluster-wide state, requested over `principal_update_queue`.
+///
+/// Each variant maps onto a [`ClusterRequest`] so that accepting one commits it
+/// to the replicated log rather than mutating local state.
+///
+/// There is deliberately no variant for executing SQL. The previous
+/// `Database { statement }` variant would have run an arbitrary statement
+/// supplied by anyone able to publish to the queue, which is a
+/// remote-code-execution path into the database dressed up as a coordination
+/// message. Schema changes belong in `migrations/`, and data changes belong
+/// behind the authenticated task API.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", content = "data")]
 enum UpdateContent {
-    Database { statement: String },
-    ConfigReload { key: String, value: String },
+    /// Assign `role` to `node_id`.
+    AssignRole { node_id: String, role: NodeRole },
+    /// Remove any role assigned to `node_id`.
+    ClearRole { node_id: String },
+    /// Set a cluster-wide configuration value.
+    SetConfig { key: String, value: String },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -165,8 +183,9 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
                         info!("Received update request: {:?}", update_request);
 
-                        match process_update_request(update_request).await {
-                            Ok(()) => {
+                        let raft_handle = raft.as_ref().map(|node| &node.raft);
+                        match process_update_request(update_request, raft_handle).await {
+                            UpdateOutcome::Applied => {
                                 delivery
                                     .ack(BasicAckOptions::default())
                                     .await
@@ -175,9 +194,15 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                         e
                                     })?;
                             }
-                            Err(e) => {
-                                error!("Failed to process update request: {:?}", e);
+                            UpdateOutcome::Rejected(reason) => {
+                                error!("Rejecting update request: {}", reason);
                                 nack_for_dead_letter(&delivery).await?;
+                            }
+                            UpdateOutcome::Retry(reason) => {
+                                // Requeue rather than dead-letter: the request is
+                                // valid and the leader can still serve it.
+                                warn!("Requeueing update request: {}", reason);
+                                settle(&delivery, true).await?;
                             }
                         }
                     }
@@ -210,140 +235,374 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn process_update_request(update: UpdateRequest) -> Result<(), Box<dyn Error>> {
+/// What the principal decided to do with an update request, which determines
+/// how the delivery is settled.
+#[derive(Debug, PartialEq, Eq)]
+enum UpdateOutcome {
+    /// Committed through Raft. Acknowledge the delivery.
+    Applied,
+    /// The request itself is bad and will never succeed. Dead-letter it rather
+    /// than requeueing a message that can only fail again.
+    Rejected(String),
+    /// The request is well-formed but this node cannot serve it right now,
+    /// typically because it is not the Raft leader. Requeue so another
+    /// principal — or this one, once it catches up — can take it.
+    Retry(String),
+}
+
+/// Applies an update request by committing it to the Raft log.
+///
+/// Every accepted request becomes a [`ClusterRequest`], so the decision is
+/// replicated to every principal instead of living in this process's memory.
+/// Only the leader may write, which is why a follower answers [`UpdateOutcome::Retry`]
+/// rather than applying anything locally.
+async fn process_update_request(update: UpdateRequest, raft: Option<&AnKiRaft>) -> UpdateOutcome {
     info!("Processing update request with ID: {}", update.update_id);
 
-    match update.content {
-        UpdateContent::Database { statement } => reject_database_update(&statement),
-        UpdateContent::ConfigReload { key, value } => reject_config_reload(&key, &value),
+    let request = match to_cluster_request(update.content) {
+        Ok(request) => request,
+        Err(reason) => return UpdateOutcome::Rejected(reason),
+    };
+
+    let Some(raft) = raft else {
+        return UpdateOutcome::Retry(
+            "Raft node is not running; cannot commit cluster updates".to_string(),
+        );
+    };
+
+    match raft.client_write(request).await {
+        Ok(response) => {
+            info!(
+                "Committed update {} at log index {}",
+                update.update_id, response.log_id.index
+            );
+            UpdateOutcome::Applied
+        }
+        // Writes only succeed on the leader. This is the ordinary state of
+        // affairs for a follower, not a failure of the request.
+        Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => {
+            UpdateOutcome::Retry(format!(
+                "not the Raft leader (leader is {:?}); requeueing update {}",
+                forward.leader_id, update.update_id
+            ))
+        }
+        Err(e) => UpdateOutcome::Retry(format!("Raft write failed: {e}")),
     }
+}
+
+/// Validates an update request and translates it into the replicated
+/// [`ClusterRequest`] vocabulary.
+fn to_cluster_request(content: UpdateContent) -> Result<ClusterRequest, String> {
+    match content {
+        UpdateContent::AssignRole { node_id, role } => {
+            let node_id = non_empty(node_id, "node_id")?;
+            Ok(ClusterRequest::AssignRole { node_id, role })
+        }
+        UpdateContent::ClearRole { node_id } => {
+            let node_id = non_empty(node_id, "node_id")?;
+            Ok(ClusterRequest::ClearRole { node_id })
+        }
+        UpdateContent::SetConfig { key, value } => {
+            let key = non_empty(key, "key")?;
+            Ok(ClusterRequest::SetConfig { key, value })
+        }
+    }
+}
+
+/// Trims `value` and rejects it if nothing is left, so blank identifiers never
+/// reach the replicated log.
+fn non_empty(value: String, field: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        Err(format!("{field} must not be empty"))
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
+/// Assigns `role` to `node_id` by committing it to the Raft log.
+///
+/// This is the programmatic entry point behind
+/// [`UpdateContent::AssignRole`]; the assignment is readable afterwards from
+/// any principal via [`SledStore::role_of`](crate::raft_store::SledStore::role_of).
+pub async fn assign_role(
+    raft: &AnKiRaft,
+    node_id: &str,
+    role: NodeRole,
+) -> Result<Option<NodeRole>, Box<dyn Error>> {
+    let node_id = non_empty(node_id.to_string(), "node_id")?;
+    let response = raft
+        .client_write(ClusterRequest::AssignRole {
+            node_id: node_id.clone(),
+            role: role.clone(),
+        })
+        .await?;
+    info!("Assigned role {:?} to node {}", role, node_id);
+    Ok(response.data.previous_role)
 }
 
 async fn nack_for_dead_letter(delivery: &Delivery) -> Result<(), lapin::Error> {
+    settle(delivery, false).await
+}
+
+/// Negatively acknowledges a delivery, requeueing it only when retrying could
+/// plausibly succeed.
+async fn settle(delivery: &Delivery, requeue: bool) -> Result<(), lapin::Error> {
     delivery
         .nack(BasicNackOptions {
             multiple: false,
-            requeue: false,
+            requeue,
         })
         .await
         .map_err(|e| {
-            error!("Failed to negatively acknowledge failed update: {:?}", e);
+            error!("Failed to negatively acknowledge update: {:?}", e);
             e
         })
-}
-
-fn reject_database_update(statement: &str) -> Result<(), Box<dyn Error>> {
-    if statement.trim().is_empty() {
-        error!("Database update validation failed: empty statement");
-        return Err("Invalid database statement".into());
-    }
-
-    error!(
-        "Database update requests are unsupported until principal database execution is implemented"
-    );
-    Err("Database update requests are unsupported".into())
-}
-
-fn reject_config_reload(key: &str, value: &str) -> Result<(), Box<dyn Error>> {
-    if key.trim().is_empty() {
-        error!("Config reload validation failed: empty key");
-        return Err("Invalid config key".into());
-    }
-
-    error!(
-        "Config reload request for {}={} is unsupported until node queue publication is implemented",
-        key, value
-    );
-    Err("Config reload requests are unsupported".into())
-}
-
-#[allow(dead_code)]
-pub async fn assign_role(
-    node_id: &str,
-    role: &str,
-    _channel: &Channel,
-) -> Result<(), Box<dyn Error>> {
-    info!("Assigned role '{}' to node '{}'", role, node_id);
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raft_store::SledStore;
+    use openraft::ServerState;
+    use std::time::Duration;
+
+    fn request(content: UpdateContent) -> UpdateRequest {
+        UpdateRequest {
+            update_id: "update-1".to_string(),
+            content,
+        }
+    }
+
+    /// A leader that accepts writes, for the happy-path cases.
+    async fn leader() -> crate::raft_node::RaftNode {
+        let store = SledStore::temporary().expect("temporary store");
+        let node = raft_node::start_single_node(1, store)
+            .await
+            .expect("start raft");
+        node.raft
+            .wait(Some(Duration::from_secs(10)))
+            .state(ServerState::Leader, "leader")
+            .await
+            .expect("became leader");
+        node
+    }
 
     #[tokio::test]
-    async fn process_update_request_database_unsupported_is_not_successful() {
-        let update = UpdateRequest {
-            update_id: "1".into(),
-            content: UpdateContent::Database {
-                statement: "UPDATE table SET value = 1".into(),
-            },
-        };
+    async fn assigning_a_role_commits_it_to_the_replicated_state() {
+        let node = leader().await;
 
-        let result = process_update_request(update).await;
+        let outcome = process_update_request(
+            request(UpdateContent::AssignRole {
+                node_id: "ki-0".to_string(),
+                role: NodeRole::Ki,
+            }),
+            Some(&node.raft),
+        )
+        .await;
+
+        assert_eq!(outcome, UpdateOutcome::Applied);
+        assert_eq!(
+            node.store.role_of("ki-0").await,
+            Some(NodeRole::Ki),
+            "the assignment must be readable from the replicated state, not just logged"
+        );
+
+        node.shutdown().await.expect("clean shutdown");
+    }
+
+    #[tokio::test]
+    async fn clearing_a_role_removes_it_from_the_replicated_state() {
+        let node = leader().await;
+        process_update_request(
+            request(UpdateContent::AssignRole {
+                node_id: "ki-0".to_string(),
+                role: NodeRole::Ki,
+            }),
+            Some(&node.raft),
+        )
+        .await;
+
+        let outcome = process_update_request(
+            request(UpdateContent::ClearRole {
+                node_id: "ki-0".to_string(),
+            }),
+            Some(&node.raft),
+        )
+        .await;
+
+        assert_eq!(outcome, UpdateOutcome::Applied);
+        assert_eq!(node.store.role_of("ki-0").await, None);
+
+        node.shutdown().await.expect("clean shutdown");
+    }
+
+    #[tokio::test]
+    async fn setting_config_commits_it_to_the_replicated_state() {
+        let node = leader().await;
+
+        let outcome = process_update_request(
+            request(UpdateContent::SetConfig {
+                key: "model_shards".to_string(),
+                value: "4".to_string(),
+            }),
+            Some(&node.raft),
+        )
+        .await;
+
+        assert_eq!(outcome, UpdateOutcome::Applied);
+        assert_eq!(
+            node.store.config_value("model_shards").await,
+            Some("4".to_string())
+        );
+
+        node.shutdown().await.expect("clean shutdown");
+    }
+
+    #[tokio::test]
+    async fn assign_role_reports_the_role_it_replaced() {
+        let node = leader().await;
+
+        let first = assign_role(&node.raft, "node-0", NodeRole::Ki)
+            .await
+            .expect("first assignment");
+        let second = assign_role(&node.raft, "node-0", NodeRole::An)
+            .await
+            .expect("second assignment");
+
+        assert_eq!(first, None);
+        assert_eq!(second, Some(NodeRole::Ki));
+        assert_eq!(node.store.role_of("node-0").await, Some(NodeRole::An));
+
+        node.shutdown().await.expect("clean shutdown");
+    }
+
+    #[tokio::test]
+    async fn blank_identifiers_are_rejected_rather_than_replicated() {
+        let node = leader().await;
+
+        for content in [
+            UpdateContent::AssignRole {
+                node_id: "   ".to_string(),
+                role: NodeRole::Ki,
+            },
+            UpdateContent::ClearRole {
+                node_id: String::new(),
+            },
+            UpdateContent::SetConfig {
+                key: " ".to_string(),
+                value: "4".to_string(),
+            },
+        ] {
+            let outcome = process_update_request(request(content), Some(&node.raft)).await;
+            assert!(
+                matches!(outcome, UpdateOutcome::Rejected(_)),
+                "got {outcome:?}"
+            );
+        }
+
+        node.shutdown().await.expect("clean shutdown");
+    }
+
+    #[tokio::test]
+    async fn identifiers_are_trimmed_before_being_replicated() {
+        let node = leader().await;
+
+        process_update_request(
+            request(UpdateContent::AssignRole {
+                node_id: "  ki-0  ".to_string(),
+                role: NodeRole::Ki,
+            }),
+            Some(&node.raft),
+        )
+        .await;
+
+        assert_eq!(node.store.role_of("ki-0").await, Some(NodeRole::Ki));
+        assert_eq!(node.store.role_of("  ki-0  ").await, None);
+
+        node.shutdown().await.expect("clean shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_follower_requeues_rather_than_applying_locally() {
+        // A node that never initialized has no leader, so it cannot write. It
+        // must not apply anything locally — that would diverge from the cluster.
+        let store = SledStore::temporary().expect("temporary store");
+        let node = raft_node::build_node(2, store).await.expect("build raft");
+
+        let outcome = process_update_request(
+            request(UpdateContent::AssignRole {
+                node_id: "ki-0".to_string(),
+                role: NodeRole::Ki,
+            }),
+            Some(&node.raft),
+        )
+        .await;
 
         assert!(
-            result.is_err(),
-            "unsupported database updates must not be reported as successful"
+            matches!(outcome, UpdateOutcome::Retry(_)),
+            "a non-leader must requeue, got {outcome:?}"
+        );
+        assert_eq!(node.store.role_of("ki-0").await, None);
+
+        node.shutdown().await.expect("clean shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_missing_raft_node_requeues_rather_than_dead_lettering() {
+        let outcome = process_update_request(
+            request(UpdateContent::SetConfig {
+                key: "model_shards".to_string(),
+                value: "4".to_string(),
+            }),
+            None,
+        )
+        .await;
+
+        assert!(
+            matches!(outcome, UpdateOutcome::Retry(_)),
+            "a valid request must survive this node failing to start Raft, got {outcome:?}"
         );
     }
 
-    #[tokio::test]
-    async fn process_update_request_database_failure() {
-        let update = UpdateRequest {
-            update_id: "2".into(),
-            content: UpdateContent::Database {
-                statement: "   ".into(),
-            },
-        };
+    #[test]
+    fn update_requests_decode_from_their_wire_format() {
+        let payload = br#"{"update_id":"1","content":{"type":"assign_role","data":{"node_id":"ki-0","role":"Ki"}}}"#;
 
-        assert!(process_update_request(update).await.is_err());
-    }
+        let decoded = decode_update_request(payload).expect("decode");
 
-    #[tokio::test]
-    async fn process_update_request_config_unsupported_is_not_successful() {
-        let update = UpdateRequest {
-            update_id: "3".into(),
-            content: UpdateContent::ConfigReload {
-                key: "threshold".into(),
-                value: "10".into(),
-            },
-        };
-
-        let result = process_update_request(update).await;
-
-        assert!(
-            result.is_err(),
-            "unsupported config reloads must not be reported as successful"
+        assert_eq!(decoded.update_id, "1");
+        assert_eq!(
+            decoded.content,
+            UpdateContent::AssignRole {
+                node_id: "ki-0".to_string(),
+                role: NodeRole::Ki,
+            }
         );
     }
 
-    #[tokio::test]
-    async fn process_update_request_config_failure() {
-        let update = UpdateRequest {
-            update_id: "4".into(),
-            content: UpdateContent::ConfigReload {
-                key: "".into(),
-                value: "10".into(),
-            },
-        };
+    #[test]
+    fn sql_statements_are_no_longer_a_valid_update() {
+        // The `database` variant used to accept an arbitrary SQL statement from
+        // anyone able to publish to the queue. It must not decode any more.
+        let payload =
+            br#"{"update_id":"1","content":{"type":"database","data":{"statement":"DROP TABLE tasks"}}}"#;
 
-        assert!(process_update_request(update).await.is_err());
+        assert!(decode_update_request(payload).is_none());
     }
 
     #[test]
     fn decode_update_request_invalid_payload_does_not_block_following_payload() {
-        let invalid_payload =
-            br#"{"update_id": "broken", "content": {"type":"database","data":{"statement":"X"}}"#;
+        let invalid_payload = br#"{"update_id": "broken", "content": {"type":"clear_role"#;
         let valid_payload =
-            br#"{"update_id":"5","content":{"type":"database","data":{"statement":"UPDATE t SET v=2"}}}"#;
+            br#"{"update_id":"5","content":{"type":"clear_role","data":{"node_id":"ki-0"}}}"#;
 
-        let first = decode_update_request(invalid_payload);
-        let second = decode_update_request(valid_payload);
-
-        assert!(first.is_none(), "invalid payload should be dropped");
         assert!(
-            second.is_some(),
+            decode_update_request(invalid_payload).is_none(),
+            "invalid payload should be dropped"
+        );
+        assert!(
+            decode_update_request(valid_payload).is_some(),
             "subsequent valid payload should still be decodable"
         );
     }

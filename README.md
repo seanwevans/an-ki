@@ -73,6 +73,34 @@ the vote and appended entries — are flushed before the storage call returns. A
 principal that restarts reloads its log and resumes the existing cluster instead
 of re-initializing as a fresh one.
 
+### Cluster Update Requests
+
+Cluster-wide changes are requested by publishing to `principal_update_queue`.
+The principal validates each request, commits it to the Raft log, and only then
+acknowledges the message — so an accepted request is replicated to every
+principal, not applied in one process's memory.
+
+```json
+{"update_id": "1", "content": {"type": "assign_role", "data": {"node_id": "ki-0", "role": "Ki"}}}
+{"update_id": "2", "content": {"type": "clear_role",  "data": {"node_id": "ki-0"}}}
+{"update_id": "3", "content": {"type": "set_config",  "data": {"key": "model_shards", "value": "4"}}}
+```
+
+How a request is settled depends on why it failed:
+
+- **Applied** — committed through Raft; the message is acknowledged.
+- **Rejected** — the request can never succeed (malformed payload, blank
+  identifier). It is dead-lettered rather than requeued, since retrying a
+  message that can only fail again just burns the queue.
+- **Requeued** — the request is valid but this principal is not the Raft leader,
+  or its Raft node is not running. The message goes back on the queue for the
+  leader to pick up.
+
+> **Note:** there is deliberately no request type for executing SQL. An earlier
+> `database` variant accepted an arbitrary statement from anyone able to publish
+> to the queue. Schema changes belong in `migrations/`; data changes belong
+> behind the authenticated task API.
+
 ### Forming a Multi-Principal Cluster
 
 Principals carry Raft RPCs to each other over HTTP. Each one serves
