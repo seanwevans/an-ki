@@ -326,7 +326,7 @@ async fn process_and_send_task(task: Task, channel: &Channel) -> Result<(), Box<
     send_result(result, channel).await
 }
 
-async fn perform_computation(task: Task) -> Result<Task, Box<dyn Error>> {
+pub async fn perform_computation(task: Task) -> Result<Task, Box<dyn Error>> {
     match task.task_type {
         TaskType::GradientUpdate => {
             info!("Performing computation for task ID: {}", task.task_id);

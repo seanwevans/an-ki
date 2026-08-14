@@ -6,7 +6,6 @@ pub mod database;
 pub mod error;
 pub mod health;
 pub mod ki_node;
-pub mod load_balancer;
 pub mod logging_metrics;
 pub mod messaging;
 pub mod network;
