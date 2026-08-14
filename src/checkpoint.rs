@@ -35,8 +35,13 @@ pub struct Checkpoint {
 /// new run rather than silently loading incompatible weights.
 pub fn model_id(spec: &MlpSpec, dataset: &DatasetSpec) -> String {
     format!(
-        "in{}-h{}-out{}-n{}-seed{}",
-        spec.inputs, spec.hidden, spec.outputs, dataset.samples, dataset.seed
+        "in{}-h{}-out{}-n{}-val{}-seed{}",
+        spec.inputs,
+        spec.hidden,
+        spec.outputs,
+        dataset.samples,
+        dataset.validation_samples,
+        dataset.seed
     )
 }
 
@@ -201,6 +206,11 @@ mod tests {
             base,
             model_id(&spec(), &DatasetSpec::new(256, 20_260_814)),
             "a different dataset size is a different training run"
+        );
+        assert_ne!(
+            base,
+            model_id(&spec(), &DatasetSpec::with_validation(512, 20_260_814, 100)),
+            "a different hold-out means the model trained on different samples"
         );
     }
 

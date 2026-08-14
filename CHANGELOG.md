@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disjoint shards so each worker contributes independent gradient signal.
 - Configurable `hidden_units`, `learning_rate`, `dataset_samples`,
   `dataset_seed`, and `init_seed`.
+- **A held-out validation split.** `validation_fraction` (default 0.2) reserves
+  part of the dataset for evaluation. Shards are cut from the training portion
+  only, so no worker computes a gradient on a validation sample, and the An node
+  reports accuracy on unseen data after each epoch.
 - **Model checkpointing.** The An node writes parameters to the
   `model_checkpoints` table every `checkpoint_interval_epochs` and resumes from
   the most recent checkpoint on startup, so a restart no longer discards the

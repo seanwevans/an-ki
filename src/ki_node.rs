@@ -256,7 +256,10 @@ pub async fn perform_computation(task: Task) -> Result<Task, Box<dyn Error>> {
             let request: GradientRequest = serde_json::from_str(&task.data)?;
 
             let samples = dataset::generate(request.dataset);
-            let shard = dataset::shard(&samples, request.shard, request.shards);
+            // Shard the training portion only. A validation sample that reached
+            // a gradient would make the evaluation meaningless.
+            let training = dataset::training(&request.dataset, &samples);
+            let shard = dataset::shard(training, request.shard, request.shards);
             if shard.is_empty() {
                 // A shard with no samples has no gradient to report. Treat it as
                 // bad input rather than replying with zeros, which the An node
@@ -264,10 +267,10 @@ pub async fn perform_computation(task: Task) -> Result<Task, Box<dyn Error>> {
                 return Err(IoError::new(
                     ErrorKind::InvalidData,
                     format!(
-                        "shard {} of {} is empty for a {}-sample dataset",
+                        "shard {} of {} is empty for a {}-sample training set",
                         request.shard,
                         request.shards,
-                        samples.len()
+                        training.len()
                     ),
                 )
                 .into());

@@ -31,16 +31,47 @@ pub const OUTPUTS: usize = 2;
 /// model cannot score well by always guessing one class.
 const RADIUS: f32 = 0.797_884_6;
 
-/// Describes a dataset completely: same values, same samples, on any node.
+/// Describes a dataset completely: same values, same samples, same split, on
+/// any node.
+///
+/// `validation_samples` is stored as a count rather than a fraction so every
+/// node divides the data at exactly the same index. A fraction would have to be
+/// rounded, and two nodes disagreeing by one sample would put a validation point
+/// into someone's training shard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatasetSpec {
     pub samples: usize,
     pub seed: u64,
+    /// Samples held out for evaluation, taken from the end of the dataset.
+    #[serde(default)]
+    pub validation_samples: usize,
 }
 
 impl DatasetSpec {
+    /// A dataset with no held-out samples.
     pub fn new(samples: usize, seed: u64) -> Self {
-        Self { samples, seed }
+        Self {
+            samples,
+            seed,
+            validation_samples: 0,
+        }
+    }
+
+    /// A dataset holding out `validation_samples` for evaluation.
+    ///
+    /// The hold-out is clamped so at least one training sample remains: a split
+    /// that left nothing to train on would produce no gradients at all.
+    pub fn with_validation(samples: usize, seed: u64, validation_samples: usize) -> Self {
+        Self {
+            samples,
+            seed,
+            validation_samples: validation_samples.min(samples.saturating_sub(1)),
+        }
+    }
+
+    /// Samples available for training.
+    pub fn training_samples(&self) -> usize {
+        self.samples.saturating_sub(self.validation_samples)
     }
 
     /// The network shape this dataset calls for, given a hidden width.
@@ -93,6 +124,20 @@ pub fn shard_range(total: usize, index: usize, count: usize) -> std::ops::Range<
 /// Borrows shard `index` of `count` from `samples`.
 pub fn shard(samples: &[Sample], index: usize, count: usize) -> &[Sample] {
     &samples[shard_range(samples.len(), index, count)]
+}
+
+/// The portion of `samples` available for training.
+///
+/// Shards are cut from this slice only, so no validation sample can reach a
+/// worker's gradient. Measuring accuracy on data the model was fitted to says
+/// nothing about whether it generalized.
+pub fn training<'a>(spec: &DatasetSpec, samples: &'a [Sample]) -> &'a [Sample] {
+    &samples[..spec.training_samples().min(samples.len())]
+}
+
+/// The held-out portion of `samples`, taken from the end.
+pub fn validation<'a>(spec: &DatasetSpec, samples: &'a [Sample]) -> &'a [Sample] {
+    &samples[spec.training_samples().min(samples.len())..]
 }
 
 #[cfg(test)]
@@ -222,8 +267,74 @@ mod tests {
     }
 
     #[test]
+    fn training_and_validation_are_disjoint_and_cover_everything() {
+        let spec = DatasetSpec::with_validation(100, 3, 20);
+        let samples = generate(spec);
+
+        let train = training(&spec, &samples);
+        let holdout = validation(&spec, &samples);
+
+        assert_eq!(train.len(), 80);
+        assert_eq!(holdout.len(), 20);
+        assert_eq!(train.len() + holdout.len(), samples.len());
+        // Disjoint by construction, but assert it: a validation sample that
+        // leaked into training would make every reported accuracy meaningless.
+        for held in holdout {
+            assert!(!train.contains(held), "a held-out sample reached training");
+        }
+    }
+
+    #[test]
+    fn shards_never_reach_the_held_out_samples() {
+        let spec = DatasetSpec::with_validation(100, 3, 20);
+        let samples = generate(spec);
+        let train = training(&spec, &samples);
+        let holdout = validation(&spec, &samples);
+
+        for index in 0..4 {
+            for sample in shard(train, index, 4) {
+                assert!(!holdout.contains(sample));
+            }
+        }
+    }
+
+    #[test]
+    fn the_hold_out_never_consumes_the_whole_dataset() {
+        // A split leaving nothing to train on would produce no gradients at all.
+        let spec = DatasetSpec::with_validation(10, 1, 10);
+        assert_eq!(spec.training_samples(), 1);
+
+        let spec = DatasetSpec::with_validation(10, 1, 99);
+        assert_eq!(spec.training_samples(), 1);
+    }
+
+    #[test]
+    fn a_spec_without_a_hold_out_trains_on_everything() {
+        let spec = DatasetSpec::new(50, 1);
+        let samples = generate(spec);
+
+        assert_eq!(spec.training_samples(), 50);
+        assert_eq!(training(&spec, &samples).len(), 50);
+        assert!(validation(&spec, &samples).is_empty());
+    }
+
+    #[test]
     fn a_single_shard_is_the_whole_dataset() {
         let samples = generate(DatasetSpec::new(25, 4));
         assert_eq!(shard(&samples, 0, 1), &samples[..]);
+    }
+
+    #[test]
+    fn the_held_out_set_is_also_roughly_balanced() {
+        // A hold-out skewed to one class would make accuracy on it misleading.
+        let spec = DatasetSpec::with_validation(2_000, 5, 400);
+        let samples = generate(spec);
+        let held = validation(&spec, &samples);
+        let inside = held.iter().filter(|s| s.label == 1).count();
+        let fraction = inside as f32 / held.len() as f32;
+        assert!(
+            (0.40..=0.60).contains(&fraction),
+            "hold-out balance was {fraction}"
+        );
     }
 }

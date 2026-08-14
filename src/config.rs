@@ -37,6 +37,9 @@ pub struct Settings {
     /// Seed for the initial parameters.
     #[serde(default = "default_init_seed")]
     pub init_seed: u64,
+    /// Fraction of the dataset held out for evaluation rather than training.
+    #[serde(default = "default_validation_fraction")]
+    pub validation_fraction: f32,
     /// Epochs between model checkpoints. Zero disables checkpointing.
     #[serde(default = "default_checkpoint_interval_epochs")]
     pub checkpoint_interval_epochs: u64,
@@ -67,6 +70,10 @@ fn default_init_seed() -> u64 {
 
 fn default_checkpoint_interval_epochs() -> u64 {
     25
+}
+
+fn default_validation_fraction() -> f32 {
+    0.2
 }
 
 fn default_epoch_interval_ms() -> u64 {
@@ -119,8 +126,17 @@ impl Settings {
     }
 
     /// Dataset every node reconstructs locally.
+    ///
+    /// The hold-out is resolved to an exact sample count here rather than
+    /// carried as a fraction, so every node divides the data at the same index
+    /// no matter how it rounds.
     pub fn dataset_spec(&self) -> crate::dataset::DatasetSpec {
-        crate::dataset::DatasetSpec::new(self.dataset_samples, self.dataset_seed)
+        let held_out = (self.dataset_samples as f32 * self.validation_fraction).round() as usize;
+        crate::dataset::DatasetSpec::with_validation(
+            self.dataset_samples,
+            self.dataset_seed,
+            held_out,
+        )
     }
 
     /// Network shape implied by the dataset and the configured hidden width.
@@ -146,11 +162,19 @@ impl Settings {
                 "learning_rate must be a positive, finite number".into(),
             ));
         }
-        if self.dataset_samples < self.model_shards {
+        if !(0.0..1.0).contains(&self.validation_fraction) {
+            // A fraction of 1.0 or more would leave nothing to train on.
+            return Err(ConfigError::Message(
+                "validation_fraction must be at least 0 and below 1".into(),
+            ));
+        }
+        if self.dataset_spec().training_samples() < self.model_shards {
             // Otherwise some shard is empty and its worker has no gradient to
             // return, so the round can never collect a full set.
             return Err(ConfigError::Message(
-                "dataset_samples must be at least model_shards".into(),
+                "training samples (after the validation hold-out) must be at least \
+                 model_shards"
+                    .into(),
             ));
         }
         // A zero interval would spin the scheduler as fast as the broker
@@ -240,6 +264,7 @@ mod tests {
             dataset_seed: 1,
             init_seed: 1,
             checkpoint_interval_epochs: 25,
+            validation_fraction: 0.2,
             epoch_interval_ms: 250,
         }
     }
