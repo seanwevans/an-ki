@@ -16,6 +16,7 @@ use std::io::Cursor;
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use openraft::storage::{Adaptor, LogState, RaftLogReader, RaftSnapshotBuilder, Snapshot};
 use openraft::{
@@ -24,7 +25,7 @@ use openraft::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::common::NodeRole;
 
@@ -114,6 +115,12 @@ const KEY_SNAPSHOT_INDEX: &str = "snapshot_index";
 const TREE_LOGS: &str = "raft_logs";
 const TREE_META: &str = "raft_meta";
 
+/// How many times to attempt opening the store before giving up.
+const OPEN_ATTEMPTS: u32 = 10;
+/// Delay between open attempts. Ten attempts covers about half a second, which
+/// is far longer than a lock release takes and far shorter than a restart budget.
+const OPEN_RETRY_DELAY: Duration = Duration::from_millis(50);
+
 /// Log indices are stored big-endian so sled's lexicographic key order matches
 /// numeric order, which is what makes range scans and `last()` correct.
 fn log_key(index: u64) -> [u8; 8] {
@@ -148,8 +155,42 @@ impl SledStore {
     /// Opens (or creates) a store rooted at `path`, restoring any state machine
     /// and snapshot a previous run left behind.
     pub fn open(path: impl AsRef<Path>) -> Result<Arc<Self>, sled::Error> {
-        let db = sled::open(path)?;
-        Self::from_db(db)
+        Self::open_with_retries(path, OPEN_ATTEMPTS, OPEN_RETRY_DELAY)
+    }
+
+    /// [`open`](Self::open) with an explicit retry budget.
+    ///
+    /// sled takes an exclusive lock on the directory, and that lock is released
+    /// when the previous handle is dropped — which is not necessarily by the
+    /// time the next open is attempted. A container that restarts promptly can
+    /// race the departing process, and failing to start over a lock that is
+    /// about to be released would turn a restart into an outage.
+    ///
+    /// Only I/O failures are retried. Corruption and unsupported formats will
+    /// not resolve themselves, so they surface immediately.
+    pub fn open_with_retries(
+        path: impl AsRef<Path>,
+        attempts: u32,
+        delay: Duration,
+    ) -> Result<Arc<Self>, sled::Error> {
+        let path = path.as_ref();
+        for attempt in 1..=attempts.max(1) {
+            match sled::open(path) {
+                Ok(db) => return Self::from_db(db),
+                Err(sled::Error::Io(e)) if attempt < attempts => {
+                    warn!(
+                        "Could not open the Raft store at {:?} (attempt {}/{}): {}. \
+                         Retrying in {:?}.",
+                        path, attempt, attempts, e, delay
+                    );
+                    std::thread::sleep(delay);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        // `attempts.max(1)` guarantees at least one iteration, and every path
+        // through the loop either returns or sleeps and continues.
+        unreachable!("the retry loop always returns on its final attempt")
     }
 
     /// Builds a store over a temporary database that is deleted when dropped.
@@ -641,6 +682,34 @@ mod tests {
         assert!(log_key(2) < log_key(10));
         assert!(log_key(255) < log_key(256));
         assert!(log_key(u64::MAX - 1) < log_key(u64::MAX));
+    }
+
+    #[tokio::test]
+    async fn reopening_immediately_after_dropping_succeeds() {
+        // sled's directory lock is released when the previous handle drops, but
+        // not necessarily before the next open is attempted. This reopens in a
+        // tight loop, which is the shape that intermittently failed in CI.
+        let dir = tempdir();
+        for round in 0..10 {
+            let store = SledStore::open(&dir)
+                .unwrap_or_else(|e| panic!("round {round} failed to open: {e}"));
+            drop(store);
+        }
+    }
+
+    #[test]
+    fn a_non_io_failure_is_not_retried() {
+        // Corruption will not resolve itself; only lock contention will. Opening
+        // a path that is a file rather than a directory fails immediately with
+        // zero retries budgeted, proving the loop always makes one attempt.
+        let mut path = std::env::temp_dir();
+        path.push(format!("an-ki-not-a-dir-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"not a database").expect("write file");
+
+        let result = SledStore::open_with_retries(&path, 0, Duration::from_millis(1));
+
+        assert!(result.is_err(), "opening a regular file must fail");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
