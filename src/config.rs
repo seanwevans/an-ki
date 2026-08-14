@@ -37,6 +37,9 @@ pub struct Settings {
     /// Seed for the initial parameters.
     #[serde(default = "default_init_seed")]
     pub init_seed: u64,
+    /// Epochs between model checkpoints. Zero disables checkpointing.
+    #[serde(default = "default_checkpoint_interval_epochs")]
+    pub checkpoint_interval_epochs: u64,
     /// Milliseconds between training epochs.
     #[serde(default = "default_epoch_interval_ms")]
     pub epoch_interval_ms: u64,
@@ -60,6 +63,10 @@ fn default_dataset_seed() -> u64 {
 
 fn default_init_seed() -> u64 {
     7
+}
+
+fn default_checkpoint_interval_epochs() -> u64 {
+    25
 }
 
 fn default_epoch_interval_ms() -> u64 {
@@ -232,6 +239,7 @@ mod tests {
             dataset_samples: 64,
             dataset_seed: 1,
             init_seed: 1,
+            checkpoint_interval_epochs: 25,
             epoch_interval_ms: 250,
         }
     }
