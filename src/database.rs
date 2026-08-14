@@ -21,13 +21,40 @@ async fn run_migrations(pool: &PgPool) -> Result<(), Box<dyn Error + Send + Sync
     ))
     .await?;
 
-    // Reshaped to fit training checkpoints rather than REST API tasks.
-    conn.batch_execute(include_str!(
-        "../migrations/003_reshape_model_checkpoints.sql"
-    ))
-    .await?;
+    // Reshaped to fit training checkpoints rather than REST API tasks. This one
+    // opens with `DROP TABLE IF EXISTS model_checkpoints`, so it must run once
+    // and never again: `get_pool` runs the migrations on every call, and every
+    // An node calls it at startup. Applying the drop unconditionally deleted
+    // every saved checkpoint each time a node came back up — precisely the
+    // state checkpointing exists to preserve.
+    if has_legacy_checkpoint_shape(&conn).await? {
+        conn.batch_execute(include_str!(
+            "../migrations/003_reshape_model_checkpoints.sql"
+        ))
+        .await?;
+    }
 
     Ok(())
+}
+
+/// Reports whether `model_checkpoints` still has the pre-003 shape.
+///
+/// The `task_id` column is the distinguishing feature: it exists only in the
+/// original table, which referenced the REST API's `tasks` rows. Its absence
+/// means 003 has already been applied and re-running it would destroy data.
+async fn has_legacy_checkpoint_shape(
+    conn: &bb8::PooledConnection<'_, PostgresConnectionManager<NoTls>>,
+) -> Result<bool, Box<dyn Error + Send + Sync>> {
+    let row = conn
+        .query_opt(
+            "SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = current_schema() \
+               AND table_name = 'model_checkpoints' \
+               AND column_name = 'task_id'",
+            &[],
+        )
+        .await?;
+    Ok(row.is_some())
 }
 
 /// Type alias for a Postgres connection pool.
@@ -97,5 +124,52 @@ mod tests {
         )
         .await
         .expect("model_checkpoints table is queryable");
+    }
+
+    #[tokio::test]
+    async fn a_restart_does_not_drop_saved_checkpoints() {
+        // Every An node calls `get_pool` at startup, which runs the migrations.
+        // Migration 003 opens with a DROP, so applying it unconditionally wiped
+        // every checkpoint on each restart — the one moment checkpoints are
+        // supposed to matter. A second `get_pool` stands in for that restart.
+        let pool = get_pool().await.expect("connect to the database");
+        let conn = pool.get().await.expect("connection");
+
+        let checkpoint_id = uuid::Uuid::new_v4();
+        let model_id = format!("restart-{}", uuid::Uuid::new_v4());
+        conn.execute(
+            "INSERT INTO model_checkpoints (checkpoint_id, model_id, epoch, parameters, loss) \
+             VALUES ($1, $2, $3, $4, $5)",
+            &[
+                &checkpoint_id,
+                &model_id,
+                &7_i64,
+                &b"parameters".to_vec(),
+                &Some(0.5_f32),
+            ],
+        )
+        .await
+        .expect("insert a checkpoint");
+
+        let _restarted = get_pool().await.expect("reconnect as a restarted node");
+
+        let survivor = conn
+            .query_opt(
+                "SELECT epoch FROM model_checkpoints WHERE checkpoint_id = $1",
+                &[&checkpoint_id],
+            )
+            .await
+            .expect("read the checkpoint back");
+        let epoch: i64 = survivor
+            .expect("the checkpoint is still there after a restart")
+            .get(0);
+        assert_eq!(epoch, 7);
+
+        conn.execute(
+            "DELETE FROM model_checkpoints WHERE checkpoint_id = $1",
+            &[&checkpoint_id],
+        )
+        .await
+        .expect("clean up");
     }
 }
