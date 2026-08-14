@@ -8,3 +8,20 @@ spec:
   ports:
     - port: 3030
       targetPort: 3030
+---
+{{- /*
+Headless service backing the StatefulSet. It gives every principal a stable
+per-pod DNS name (principal-0.principal-headless, ...), which is how peers will
+address each other once the Raft transport lands.
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: principal-headless
+spec:
+  clusterIP: None
+  selector:
+    app: principal
+  ports:
+    - port: 3030
+      targetPort: 3030

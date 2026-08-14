@@ -105,14 +105,18 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
         Err(e) => error!("Failed to open health-monitor channel: {:?}", e),
     }
 
-    // Start the Raft consensus node. Today this is a single-member cluster that
-    // elects itself leader; multi-node operation arrives by replacing the
-    // networking stub in `raft_node` with a real transport.
-    let raft_id = raft_node::node_id_from_env();
-    let raft = match raft_node::start_single_node(raft_id).await {
-        Ok(raft) => {
-            info!("Raft consensus node started (id={})", raft_id);
-            Some(raft)
+    // Start the Raft consensus node over its durable store. Today this is a
+    // single-member cluster that elects itself leader; multi-node operation
+    // arrives by replacing the networking stub in `raft_node` with a real
+    // transport. State committed here survives a restart.
+    let raft = match raft_node::start_from_env().await {
+        Ok(node) => {
+            info!(
+                "Raft consensus node started (id={}, data_dir={:?})",
+                node.node_id,
+                raft_node::data_dir_from_env()
+            );
+            Some(node)
         }
         Err(e) => {
             error!("Failed to start Raft consensus node: {:?}", e);
@@ -168,8 +172,8 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     // Stop the health monitor and Raft node before tearing down the connection.
     health_cancel.cancel();
-    if let Some(raft) = raft {
-        if let Err(e) = raft.shutdown().await {
+    if let Some(node) = raft {
+        if let Err(e) = node.shutdown().await {
             error!("Failed to shut down Raft node: {:?}", e);
         }
     }

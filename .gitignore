@@ -75,3 +75,6 @@ __pycache__/
 # Ignore node_modules if using Node.js for something like front-end or API docs
 node_modules/
 file.structure
+
+# Raft log and state machine written by the principal at runtime
+/data/

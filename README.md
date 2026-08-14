@@ -27,7 +27,7 @@ A distributed neural network project that supports task scheduling, load balanci
 - **Fault Tolerance:** Built-in backup and recovery mechanisms for task persistence.
 - **Secure Communication:** JWT-based authentication and role-based access control on the REST API, plus AES-256-GCM encryption of model-update messages exchanged between nodes (keyed by `jwt_secret_key`).
 - **Dynamic Node Discovery:** Uses a distributed hash table (DHT) for node management.
-- **Consensus & Leader Election:** Uses the Raft protocol (via [`openraft`](https://github.com/datafuselabs/openraft)) for a replicated, consistent log and automatic leader election. The principal runs a Raft node — a single-member cluster today, with multi-node operation arriving once the networking transport in `raft_node` is implemented.
+- **Consensus & Leader Election:** Uses the Raft protocol (via [`openraft`](https://github.com/datafuselabs/openraft)) for a replicated, consistent log and automatic leader election, over a durable [`sled`](https://github.com/spacejam/sled)-backed log that survives restarts. The principal runs a Raft node — a single-member cluster today, with multi-node operation arriving once the networking transport in `raft_node` is implemented.
 - **Monitoring and Metrics:** Supports Prometheus metrics and detailed logging for monitoring.
 - **Configurable:** Easily configurable using environment variables and configuration files.
 
@@ -56,6 +56,32 @@ misses or reports `HEALTH_UNHEALTHY_THRESHOLD` consecutive unhealthy checks
 (default 3). Each node identifies itself with the `NODE_ID` environment variable
 when set, or a generated UUID otherwise.
 
+
+### Replicated Cluster State
+
+The principal's authoritative state — which role each node is assigned, and
+cluster-wide configuration overrides — lives in the Raft log rather than in one
+process's memory. Every change is a `ClusterRequest` entry
+(`AssignRole`, `ClearRole`, `SetConfig`) that is committed through Raft and then
+folded into the state machine, so each principal derives the same state from the
+same log.
+
+The log, the state machine, and the vote are persisted to a local `sled`
+database under `RAFT_DATA_DIR` (default `data/raft`, with a per-node
+subdirectory named after `RAFT_NODE_ID`). Writes Raft cannot afford to lose —
+the vote and appended entries — are flushed before the storage call returns. A
+principal that restarts reloads its log and resumes the existing cluster instead
+of re-initializing as a fresh one.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `RAFT_NODE_ID` | `1` | This principal's numeric Raft id; must be unique per principal |
+| `RAFT_DATA_DIR` | `data/raft` | Directory holding the Raft log and state machine |
+
+Because this state is on disk, the Helm chart runs the principal as a
+`StatefulSet` with a per-replica `PersistentVolumeClaim` and derives
+`RAFT_NODE_ID` from the pod ordinal. Running it as a `Deployment` on ephemeral
+storage would hand a rescheduled principal an empty log.
 
 ## Getting Started
 

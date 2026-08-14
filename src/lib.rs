@@ -16,6 +16,7 @@ pub mod network;
 pub mod node_registry;
 pub mod principal;
 pub mod raft_node;
+pub mod raft_store;
 pub mod scheduler;
 pub mod security;
 pub mod signals;

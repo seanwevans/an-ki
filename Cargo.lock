@@ -1108,7 +1108,6 @@ dependencies = [
  "nix",
  "once_cell",
  "openraft",
- "openraft-memstore",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -2398,19 +2397,6 @@ dependencies = [
  "quote",
  "semver",
  "syn 2.0.106",
-]
-
-[[package]]
-name = "openraft-memstore"
-version = "0.9.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02cee827e9d229402612a63f5c059839609d7c2ea6864cdc306107fc9b8c24e2"
-dependencies = [
- "openraft",
- "serde 1.0.219",
- "serde_json",
- "tokio",
- "tracing",
 ]
 
 [[package]]
