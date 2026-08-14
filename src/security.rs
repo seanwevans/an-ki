@@ -28,12 +28,21 @@ pub struct Claims {
     pub exp: usize,     // Expiration time as a UNIX timestamp
 }
 
-fn get_secret_key() -> Result<String, AnKiError> {
-    if let Ok(secret) = env::var("JWT_SECRET_KEY") {
+/// Resolves the signing secret from a caller-supplied variable lookup.
+///
+/// The precedence — inline value, then file, then configuration — is the part
+/// worth testing, and taking the lookup as an argument lets tests exercise it
+/// without mutating process-global environment. `get_secret_key` supplies the
+/// real environment.
+fn resolve_secret_key<F>(lookup: F) -> Result<String, AnKiError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if let Some(secret) = lookup("JWT_SECRET_KEY") {
         return Ok(secret);
     }
 
-    if let Ok(path) = env::var("JWT_SECRET_KEY_FILE") {
+    if let Some(path) = lookup("JWT_SECRET_KEY_FILE") {
         let secret = fs::read_to_string(&path).map_err(|e| AnKiError::Config(e.to_string()))?;
         return Ok(secret.trim().to_owned());
     }
@@ -41,6 +50,10 @@ fn get_secret_key() -> Result<String, AnKiError> {
     crate::config::load_settings()
         .map(|settings| settings.jwt_secret_key)
         .map_err(|e| AnKiError::Config(e.to_string()))
+}
+
+fn get_secret_key() -> Result<String, AnKiError> {
+    resolve_secret_key(|key| env::var(key).ok())
 }
 
 /// Returns the shared secret used for symmetric (AES-256-GCM) encryption of
@@ -55,6 +68,16 @@ pub fn generate_token(
     role: NodeRole,
     expiration_minutes: i64,
 ) -> Result<String, AnKiError> {
+    let secret_key = get_secret_key()?;
+    generate_token_with_secret(node_id, role, expiration_minutes, &secret_key)
+}
+
+fn generate_token_with_secret(
+    node_id: &str,
+    role: NodeRole,
+    expiration_minutes: i64,
+    secret_key: &str,
+) -> Result<String, AnKiError> {
     let expiration = Utc::now() + Duration::minutes(expiration_minutes);
     let claims = Claims {
         sub: node_id.to_owned(),
@@ -62,7 +85,6 @@ pub fn generate_token(
         exp: expiration.timestamp() as usize,
     };
 
-    let secret_key = get_secret_key()?;
     let token = encode(
         &Header::default(),
         &claims,
@@ -78,6 +100,10 @@ pub fn generate_token(
 
 pub fn verify_token(token: &str) -> Result<TokenData<Claims>, AnKiError> {
     let secret_key = get_secret_key()?;
+    verify_token_with_secret(token, &secret_key)
+}
+
+fn verify_token_with_secret(token: &str, secret_key: &str) -> Result<TokenData<Claims>, AnKiError> {
     let token_data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret_key.as_bytes()),
@@ -92,9 +118,18 @@ pub fn verify_token(token: &str) -> Result<TokenData<Claims>, AnKiError> {
 }
 
 pub fn renew_token(token: &str, expiration_minutes: i64) -> Result<String, AnKiError> {
-    let token_data = verify_token(token)?;
+    let secret_key = get_secret_key()?;
+    renew_token_with_secret(token, expiration_minutes, &secret_key)
+}
+
+fn renew_token_with_secret(
+    token: &str,
+    expiration_minutes: i64,
+    secret_key: &str,
+) -> Result<String, AnKiError> {
+    let token_data = verify_token_with_secret(token, secret_key)?;
     let Claims { sub, role, .. } = &token_data.claims;
-    generate_token(sub, role.clone(), expiration_minutes)
+    generate_token_with_secret(sub, role.clone(), expiration_minutes, secret_key)
 }
 
 const SALT_LEN: usize = 16;
@@ -221,50 +256,38 @@ pub fn verify_challenge(
 #[cfg(test)]
 mod tests {
     use super::{
-        decrypt_message, encrypt_message, generate_challenge, generate_token, renew_token,
-        sign_challenge, validate_certificate, verify_challenge, verify_token, Claims, NONCE_LEN,
-        SALT_LEN,
+        decrypt_message, encrypt_message, generate_challenge, generate_token_with_secret,
+        renew_token_with_secret, resolve_secret_key, sign_challenge, validate_certificate,
+        verify_challenge, verify_token_with_secret, Claims, NONCE_LEN, SALT_LEN,
     };
     use crate::common::NodeRole;
     use crate::error::AnKiError;
     use base64::{engine::general_purpose, Engine as _};
-    use once_cell::sync::Lazy;
     use rcgen::{
         BasicConstraints, Certificate as RcCertificate, CertificateParams, ExtendedKeyUsagePurpose,
         IsCa,
     };
     use std::fs;
-    use std::sync::Mutex;
 
-    static TEST_ENV_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
-
-    fn restore_env(key: &str, value: Option<String>) {
-        if let Some(val) = value {
-            std::env::set_var(key, val);
-        } else {
-            std::env::remove_var(key);
+    /// A stand-in for the process environment. Tests describe the variables
+    /// they want `resolve_secret_key` to see instead of setting them for the
+    /// whole process, so nothing here can perturb a test running in parallel.
+    fn lookup_from<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| (*value).to_owned())
         }
     }
 
-    fn clear_secret_overrides() {
-        std::env::remove_var("JWT_SECRET_KEY");
-        std::env::remove_var("JWT_SECRET_KEY_FILE");
-    }
-
     #[test]
-    fn test_generate_and_verify_token_from_settings() {
-        let _guard = TEST_ENV_GUARD.lock().unwrap();
-        let original_run_env = std::env::var("RUN_ENV").ok();
-        let original_secret = std::env::var("JWT_SECRET_KEY").ok();
-        let original_secret_file = std::env::var("JWT_SECRET_KEY_FILE").ok();
-
-        clear_secret_overrides();
-        std::env::set_var("RUN_ENV", "test_security");
-
+    fn a_token_round_trips_through_the_secret_that_signed_it() {
         let node_id = "test_node";
         let role = NodeRole::An;
-        let token = generate_token(node_id, role.clone(), 60).unwrap();
-        let token_data = verify_token(&token).unwrap();
+
+        let token = generate_token_with_secret(node_id, role.clone(), 60, "a-secret").unwrap();
+        let token_data = verify_token_with_secret(&token, "a-secret").unwrap();
         let Claims {
             sub,
             role: claim_role,
@@ -274,66 +297,61 @@ mod tests {
         assert_eq!(sub, node_id);
         assert_eq!(claim_role, role);
 
-        let settings = crate::config::load_settings().unwrap();
-        assert_eq!(settings.jwt_secret_key, "test-security-secret");
-
-        restore_env("RUN_ENV", original_run_env);
-        restore_env("JWT_SECRET_KEY", original_secret);
-        restore_env("JWT_SECRET_KEY_FILE", original_secret_file);
+        // A token is only worth anything because the wrong secret rejects it.
+        assert!(verify_token_with_secret(&token, "another-secret").is_err());
     }
 
     #[test]
-    fn test_generate_and_verify_token_env_override() {
-        let _guard = TEST_ENV_GUARD.lock().unwrap();
-        let original_run_env = std::env::var("RUN_ENV").ok();
-        let original_secret = std::env::var("JWT_SECRET_KEY").ok();
-        let original_secret_file = std::env::var("JWT_SECRET_KEY_FILE").ok();
-
-        std::env::set_var("JWT_SECRET_KEY", "env_secret_key");
-        std::env::remove_var("RUN_ENV");
-        std::env::remove_var("JWT_SECRET_KEY_FILE");
-
-        let node_id = "env_node";
-        let role = NodeRole::An;
-        let token = generate_token(node_id, role.clone(), 60).unwrap();
-        let token_data = verify_token(&token).unwrap();
-
-        assert_eq!(token_data.claims.sub, node_id);
-        assert_eq!(token_data.claims.role, role);
-
-        restore_env("RUN_ENV", original_run_env);
-        restore_env("JWT_SECRET_KEY", original_secret);
-        restore_env("JWT_SECRET_KEY_FILE", original_secret_file);
-    }
-
-    #[test]
-    fn test_generate_and_verify_token_file_override() {
-        let _guard = TEST_ENV_GUARD.lock().unwrap();
-        let original_run_env = std::env::var("RUN_ENV").ok();
-        let original_secret = std::env::var("JWT_SECRET_KEY").ok();
-        let original_secret_file = std::env::var("JWT_SECRET_KEY_FILE").ok();
-
-        clear_secret_overrides();
-        std::env::remove_var("RUN_ENV");
-
+    fn an_inline_secret_wins_over_a_secret_file() {
         let mut path = std::env::temp_dir();
-        path.push(format!("anki_jwt_secret_{}", std::process::id()));
+        path.push(format!("anki_jwt_secret_precedence_{}", std::process::id()));
         fs::write(&path, "file_secret_key").unwrap();
-        std::env::set_var("JWT_SECRET_KEY_FILE", &path);
 
-        let node_id = "file_node";
-        let role = NodeRole::An;
-        let token = generate_token(node_id, role.clone(), 60).unwrap();
-        let token_data = verify_token(&token).unwrap();
-
-        assert_eq!(token_data.claims.sub, node_id);
-        assert_eq!(token_data.claims.role, role);
+        let resolved = resolve_secret_key(lookup_from(&[
+            ("JWT_SECRET_KEY", "env_secret_key"),
+            ("JWT_SECRET_KEY_FILE", path.to_str().unwrap()),
+        ]))
+        .unwrap();
 
         fs::remove_file(path).unwrap();
+        assert_eq!(resolved, "env_secret_key");
+    }
 
-        restore_env("RUN_ENV", original_run_env);
-        restore_env("JWT_SECRET_KEY", original_secret);
-        restore_env("JWT_SECRET_KEY_FILE", original_secret_file);
+    #[test]
+    fn a_secret_file_is_read_and_trimmed() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("anki_jwt_secret_file_{}", std::process::id()));
+        // Trailing newline: how a file written by `echo`, a ConfigMap, or a
+        // Kubernetes Secret mount actually arrives.
+        fs::write(&path, "file_secret_key\n").unwrap();
+
+        let resolved = resolve_secret_key(lookup_from(&[(
+            "JWT_SECRET_KEY_FILE",
+            path.to_str().unwrap(),
+        )]))
+        .unwrap();
+
+        fs::remove_file(path).unwrap();
+        assert_eq!(resolved, "file_secret_key");
+    }
+
+    #[test]
+    fn a_missing_secret_file_is_an_error_rather_than_a_fallback() {
+        // Silently falling through to configuration here would mean a
+        // misspelled JWT_SECRET_KEY_FILE signs tokens with the wrong key and
+        // nothing says so until verification fails somewhere else.
+        let result = resolve_secret_key(lookup_from(&[(
+            "JWT_SECRET_KEY_FILE",
+            "/nonexistent/an-ki/jwt-secret",
+        )]));
+        assert!(matches!(result, Err(AnKiError::Config(_))));
+    }
+
+    #[test]
+    fn configuration_supplies_the_secret_when_no_override_is_set() {
+        let from_settings = crate::config::load_settings().unwrap().jwt_secret_key;
+        let resolved = resolve_secret_key(lookup_from(&[])).unwrap();
+        assert_eq!(resolved, from_settings);
     }
 
     #[test]
@@ -368,24 +386,16 @@ mod tests {
     }
 
     #[test]
-    fn test_renew_token() {
-        let _guard = TEST_ENV_GUARD.lock().unwrap();
-        let original_run_env = std::env::var("RUN_ENV").ok();
-        let original_secret = std::env::var("JWT_SECRET_KEY").ok();
-        let original_secret_file = std::env::var("JWT_SECRET_KEY_FILE").ok();
+    fn renewal_carries_the_subject_and_role_forward() {
+        let token = generate_token_with_secret("node", NodeRole::Ki, 1, "test_secret_key").unwrap();
+        let renewed = renew_token_with_secret(&token, 60, "test_secret_key").unwrap();
+        let data = verify_token_with_secret(&renewed, "test_secret_key").unwrap();
 
-        std::env::set_var("JWT_SECRET_KEY", "test_secret_key");
-        std::env::remove_var("RUN_ENV");
-        std::env::remove_var("JWT_SECRET_KEY_FILE");
-
-        let token = generate_token("node", NodeRole::Ki, 1).unwrap();
-        let renewed = renew_token(&token, 60).unwrap();
-        let data = verify_token(&renewed).unwrap();
         assert_eq!(data.claims.sub, "node");
-
-        restore_env("RUN_ENV", original_run_env);
-        restore_env("JWT_SECRET_KEY", original_secret);
-        restore_env("JWT_SECRET_KEY_FILE", original_secret_file);
+        assert_eq!(data.claims.role, NodeRole::Ki);
+        // The point of renewal: a later expiry on otherwise identical claims.
+        let original = verify_token_with_secret(&token, "test_secret_key").unwrap();
+        assert!(data.claims.exp > original.claims.exp);
     }
 
     #[test]
