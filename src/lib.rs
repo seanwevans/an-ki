@@ -3,7 +3,6 @@ pub mod api;
 pub mod common;
 pub mod config;
 pub mod database;
-pub mod election;
 pub mod error;
 pub mod health;
 pub mod ki_node;

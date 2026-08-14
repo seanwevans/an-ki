@@ -4,7 +4,9 @@ use crate::common::NodeRole;
 use crate::health;
 use crate::messaging::{consume_messages, declare_queue};
 use crate::node_registry::{self, NodeRegistry};
-use crate::raft_node;
+use crate::raft_network;
+use crate::raft_node::{self, AnKiRaft};
+use crate::raft_store::ClusterRequest;
 use crate::signals;
 
 use crate::config::load_settings;
@@ -275,7 +277,28 @@ async fn log_cluster_view(registry: &NodeRegistry) {
     );
 }
 
-async fn process_update_request(update: UpdateRequest) -> Result<(), Box<dyn Error>> {
+/// What the principal decided to do with an update request, which determines
+/// how the delivery is settled.
+#[derive(Debug, PartialEq, Eq)]
+enum UpdateOutcome {
+    /// Committed through Raft. Acknowledge the delivery.
+    Applied,
+    /// The request itself is bad and will never succeed. Dead-letter it rather
+    /// than requeueing a message that can only fail again.
+    Rejected(String),
+    /// The request is well-formed but this node cannot serve it right now,
+    /// typically because it is not the Raft leader. Requeue so another
+    /// principal — or this one, once it catches up — can take it.
+    Retry(String),
+}
+
+/// Applies an update request by committing it to the Raft log.
+///
+/// Every accepted request becomes a [`ClusterRequest`], so the decision is
+/// replicated to every principal instead of living in this process's memory.
+/// Only the leader may write, which is why a follower answers [`UpdateOutcome::Retry`]
+/// rather than applying anything locally.
+async fn process_update_request(update: UpdateRequest, raft: Option<&AnKiRaft>) -> UpdateOutcome {
     info!("Processing update request with ID: {}", update.update_id);
 
     let request = match to_cluster_request(update.content) {
