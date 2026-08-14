@@ -8,9 +8,9 @@ use crate::{
     common::{self, GradientReply, Task, TaskType},
     config::load_settings,
     database,
-    dataset::DatasetSpec,
+    dataset::{self, DatasetSpec},
     health, logging_metrics, messaging,
-    model::MlpSpec,
+    model::{self, MlpSpec, Sample},
     scheduler, signals,
 };
 use futures_util::stream::StreamExt;
@@ -102,6 +102,10 @@ pub struct AnNodeState {
     /// Sum of each shard's mean loss weighted by its sample count.
     loss_accumulator: f64,
     last_epoch_loss: Option<f32>,
+    /// Accuracy on the held-out set after the last completed epoch.
+    last_validation_accuracy: Option<f32>,
+    /// The held-out samples, generated once rather than per epoch.
+    validation: Vec<Sample>,
     epochs_completed: u64,
 }
 
@@ -119,8 +123,12 @@ impl AnNodeState {
         init_seed: u64,
     ) -> Self {
         let parameters = spec.initialize(init_seed);
+        let all_samples = dataset::generate(dataset);
+        let validation = dataset::validation(&dataset, &all_samples).to_vec();
         Self {
             accumulator: vec![0.0; parameters.len()],
+            last_validation_accuracy: None,
+            validation,
             spec,
             dataset,
             parameters,
@@ -184,9 +192,22 @@ impl AnNodeState {
         self.replies
     }
 
-    /// Mean loss of the last completed epoch, once one has completed.
+    /// Mean training loss of the last completed epoch, once one has completed.
     pub fn last_epoch_loss(&self) -> Option<f32> {
         self.last_epoch_loss
+    }
+
+    /// Accuracy on the held-out set after the last completed epoch.
+    ///
+    /// `None` when no epoch has completed, or when the dataset holds nothing
+    /// back — in which case there is no honest number to report.
+    pub fn last_validation_accuracy(&self) -> Option<f32> {
+        self.last_validation_accuracy
+    }
+
+    /// The held-out samples this node evaluates against.
+    pub fn validation_set(&self) -> &[Sample] {
+        &self.validation
     }
 
     pub fn epochs_completed(&self) -> u64 {
@@ -272,12 +293,25 @@ impl AnNodeState {
         self.last_epoch_loss =
             Some((self.loss_accumulator / self.accumulated_samples as f64) as f32);
         self.epochs_completed += 1;
+
+        // Evaluate on data no worker trained on. Accuracy over the training set
+        // would measure how well the model memorized it, not whether it
+        // generalized.
+        self.last_validation_accuracy = if self.validation.is_empty() {
+            None
+        } else {
+            model::accuracy(&self.spec, &self.parameters, &self.validation).ok()
+        };
+
         info!(
-            "Epoch {} complete over {} samples from {} shard(s): loss {:.5}",
+            "Epoch {} over {} samples from {} shard(s): training loss {:.5}, validation accuracy {}",
             self.epochs_completed,
             self.accumulated_samples,
             self.replies,
-            self.last_epoch_loss.unwrap_or(f32::NAN)
+            self.last_epoch_loss.unwrap_or(f32::NAN),
+            self.last_validation_accuracy
+                .map(|a| format!("{a:.4}"))
+                .unwrap_or_else(|| "n/a".to_string())
         );
 
         self.accumulator.iter_mut().for_each(|value| *value = 0.0);

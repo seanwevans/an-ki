@@ -175,7 +175,7 @@ mod tests {
     }
 
     fn data() -> DatasetSpec {
-        DatasetSpec::new(256, 20_260_814)
+        DatasetSpec::with_validation(320, 20_260_814, 64)
     }
 
     #[test]
@@ -282,20 +282,49 @@ mod tests {
     /// evidence that the gradients were computed, shipped, averaged, and applied
     /// correctly at every step.
     #[tokio::test]
-    async fn training_across_four_shards_learns_the_task() {
+    async fn training_across_four_shards_generalizes_to_held_out_data() {
         let state = train(4, 400).await;
 
-        let samples = dataset::generate(data());
-        let accuracy =
-            model::accuracy(&state.spec(), state.parameters(), &samples).expect("accuracy");
+        // Measured on samples no worker ever received. Accuracy over the
+        // training set would only show how well the model memorized it.
+        let accuracy = state
+            .last_validation_accuracy()
+            .expect("an epoch completed with a hold-out");
         let loss = state.last_epoch_loss().expect("an epoch completed");
 
         assert_eq!(state.epochs_completed(), 400);
         assert!(
-            accuracy > 0.85,
-            "expected the model to learn the circle, got accuracy {accuracy} (loss {loss})"
+            !state.validation_set().is_empty(),
+            "the hold-out must be non-empty for this assertion to mean anything"
         );
-        assert!(loss < 0.25, "loss stalled at {loss}");
+        assert!(
+            accuracy > 0.85,
+            "expected the model to generalize, got validation accuracy {accuracy} \
+             (training loss {loss})"
+        );
+        assert!(loss < 0.25, "training loss stalled at {loss}");
+    }
+
+    /// Held-out accuracy should track training accuracy closely on a task this
+    /// small. A large gap would mean the model memorized the training shards
+    /// rather than learning the boundary.
+    #[tokio::test]
+    async fn held_out_accuracy_tracks_training_accuracy() {
+        let state = train(4, 400).await;
+        let samples = dataset::generate(data());
+
+        let on_training = model::accuracy(
+            &state.spec(),
+            state.parameters(),
+            dataset::training(&data(), &samples),
+        )
+        .expect("training accuracy");
+        let on_holdout = state.last_validation_accuracy().expect("validation");
+
+        assert!(
+            (on_training - on_holdout).abs() < 0.15,
+            "training {on_training} vs held-out {on_holdout} suggests memorization"
+        );
     }
 
     #[tokio::test]

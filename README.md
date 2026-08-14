@@ -189,7 +189,8 @@ completes.
 | `model_shards` | `1` | Shards per epoch, and gradients required to close a round |
 | `hidden_units` | `16` | Hidden layer width; the parameter count follows from it |
 | `learning_rate` | `1.0` | Step size applied to the averaged gradient |
-| `dataset_samples` | `512` | Size of the generated training set |
+| `dataset_samples` | `512` | Size of the generated dataset |
+| `validation_fraction` | `0.2` | Fraction held out for evaluation rather than training |
 | `dataset_seed` | `20260814` | Dataset seed — every node must agree on it |
 | `init_seed` | `7` | Seed for the initial parameters |
 | `training_epochs` | `400` | Epochs to dispatch before the scheduler stops |
@@ -232,7 +233,13 @@ genuinely used its hidden layer rather than collapsing to a linear fit.
 dataset from `dataset_seed` and takes its own shard, so payloads stay
 proportional to the model rather than to the data.
 
-With the shipped defaults the model reaches about 99% accuracy over 400 epochs.
+**A fifth of the data is held out.** Shards are cut from the training portion
+only, so no worker ever computes a gradient on a validation sample. The An node
+reports accuracy on that held-out set after every epoch — accuracy over the
+training data would only measure how well the model memorized it.
+
+With the shipped defaults the model reaches roughly 99% accuracy on data it
+never trained on, over 400 epochs.
 
 ## Getting Started
 

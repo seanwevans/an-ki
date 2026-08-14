@@ -24,3 +24,5 @@ dataset_seed = 20260814
 init_seed = 7
 # Epochs between model checkpoints. Zero disables checkpointing.
 checkpoint_interval_epochs = 25
+# Fraction of the dataset held out for evaluation rather than training.
+validation_fraction = 0.2
