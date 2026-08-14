@@ -58,8 +58,14 @@ jobs:
           POSTGRES_DB: an_ki_test
         ports:
           - 5432:5432
+        # `pg_isready` with no arguments connects as the invoking OS user, and
+        # the health check runs as root inside the container. Setting
+        # POSTGRES_USER means there is no `root` role *and* no `postgres` role,
+        # so the bare form logs `FATAL: role "root" does not exist` forever and
+        # the service never reports healthy — the job then dies before a single
+        # test runs. Name the role and database explicitly.
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U an_ki -d an_ki_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 12
