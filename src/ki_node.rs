@@ -8,7 +8,6 @@ use crate::health;
 use crate::logging_metrics;
 use crate::messaging;
 use crate::model;
-use crate::security;
 use crate::signals;
 use futures_util::stream::StreamExt;
 use lapin::{
@@ -88,29 +87,6 @@ fn normalize_reconnect_attempts(raw: u32) -> u32 {
     }
 }
 
-#[derive(Default)]
-struct KiNodeState {
-    model_params: Vec<f32>,
-}
-
-impl KiNodeState {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    fn update_model(&mut self, task: &Task) -> Result<(), serde_json::Error> {
-        let params: Vec<f32> = serde_json::from_str(&task.data)?;
-        self.model_params = params;
-        info!("Updated local model parameters");
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn parameters(&self) -> &[f32] {
-        &self.model_params
-    }
-}
-
 fn deserialize_task_message(queue_name: &str, payload: &[u8]) -> Result<Task, serde_json::Error> {
     serde_json::from_slice::<Task>(payload).map_err(|e| {
         error!(
@@ -167,26 +143,12 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
 
     let queue_name = "ki_task_queue";
     let consumer_tag = "ki_consumer";
-    let model_queue_name = "ki_model_queue";
-    let model_consumer_tag = "ki_model_consumer";
-
-    let mut state = KiNodeState::new();
 
     loop {
         let (channel, mut consumer) = messaging::connect_with_retries(
             &amqp_addr,
             queue_name,
             consumer_tag,
-            max_retries,
-            backoff_ms,
-            max_backoff_ms,
-        )
-        .await?;
-
-        let (_model_channel, mut model_consumer) = messaging::connect_with_retries(
-            &amqp_addr,
-            model_queue_name,
-            model_consumer_tag,
             max_retries,
             backoff_ms,
             max_backoff_ms,
@@ -263,56 +225,6 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                         }
                         None => {
                             error!("Consumer stream closed");
-                            break;
-                        }
-                    }
-                }
-                model_delivery = model_consumer.next() => {
-                    match model_delivery {
-                        Some(Ok(delivery)) => {
-                            let parsed = security::message_key().and_then(|key| {
-                                messaging::decrypt_payload::<Task>(&delivery.data, &key)
-                            });
-                            match parsed {
-                                Ok(task_message) => match state.update_model(&task_message) {
-                                    Ok(()) => {
-                                        if let Err(e) = delivery.ack(BasicAckOptions::default()).await {
-                                            error!("Failed to acknowledge model update: {:?}", e);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!(
-                                            "Dropping invalid model update without requeue: {:?}",
-                                            e
-                                        );
-                                        if let Err(e) = delivery.nack(nack_options(false)).await {
-                                            error!(
-                                                "Failed to negatively acknowledge model update: {:?}",
-                                                e
-                                            );
-                                        }
-                                    }
-                                },
-                                Err(e) => {
-                                    error!(
-                                        "Dropping undecryptable or malformed model update without requeue: {:?}",
-                                        e
-                                    );
-                                    if let Err(e) = delivery.nack(nack_options(false)).await {
-                                        error!(
-                                            "Failed to negatively acknowledge model update: {:?}",
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        Some(Err(e)) => {
-                            error!("Error in model consumer stream: {:?}", e);
-                            break;
-                        }
-                        None => {
-                            error!("Model consumer stream closed");
                             break;
                         }
                     }
@@ -455,19 +367,6 @@ mod tests {
     #[test]
     fn high_reconnect_attempt_count_is_preserved() {
         assert_eq!(normalize_reconnect_attempts(100), 100);
-    }
-
-    #[test]
-    fn test_update_model_parameters() {
-        let mut state = KiNodeState::new();
-        let task = Task {
-            task_id: uuid::Uuid::new_v4(),
-            task_type: TaskType::ParameterPull,
-            data: serde_json::to_string(&vec![1.0_f32, 2.5_f32]).unwrap(),
-        };
-
-        state.update_model(&task).unwrap();
-        assert_eq!(state.parameters(), &[1.0_f32, 2.5_f32]);
     }
 
     #[tokio::test]
@@ -642,52 +541,5 @@ mod tests {
             .ack(BasicAckOptions::default())
             .await
             .expect("ack result");
-    }
-
-    #[cfg(feature = "integration-tests")]
-    #[tokio::test]
-    async fn test_model_update_consumption() {
-        use futures_util::StreamExt;
-        use tokio::time::{timeout, Duration};
-
-        const AMQP_ADDR: &str = "amqp://127.0.0.1:5672/%2f";
-
-        let channel = match messaging::establish_connection(AMQP_ADDR).await {
-            Ok(ch) => ch,
-            Err(_) => return, // RabbitMQ not available
-        };
-
-        messaging::declare_queue(&channel, "ki_model_queue")
-            .await
-            .expect("declare model queue");
-
-        let payload_task = Task {
-            task_id: uuid::Uuid::new_v4(),
-            task_type: TaskType::ParameterPull,
-            data: serde_json::to_string(&vec![0.5_f32, -1.0_f32]).unwrap(),
-        };
-
-        let key = "test-model-key";
-        messaging::publish_encrypted(&channel, "ki_model_queue", &payload_task, key)
-            .await
-            .expect("publish model update");
-
-        let mut consumer =
-            messaging::consume_messages(&channel, "ki_model_queue", "test_model_consumer")
-                .await
-                .expect("consume model queue");
-
-        if let Ok(Some(Ok(delivery))) = timeout(Duration::from_secs(5), consumer.next()).await {
-            let task: Task =
-                messaging::decrypt_payload(&delivery.data, key).expect("decrypt model task");
-            let mut state = KiNodeState::new();
-            state.update_model(&task).expect("update model");
-            assert_eq!(state.parameters(), &[0.5_f32, -1.0_f32]);
-
-            delivery
-                .ack(BasicAckOptions::default())
-                .await
-                .expect("ack model update");
-        }
     }
 }

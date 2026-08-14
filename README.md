@@ -25,7 +25,7 @@ A distributed neural network: a multi-layer perceptron trained data-parallel acr
 
 - **Task Scheduling:** An nodes dispatch one task per model shard each epoch onto `ki_task_queue`; the broker distributes them across whichever Ki nodes are alive.
 - **Fault Tolerance:** Tasks are persisted to the database by the task recovery manager, so they survive a node restart and can be recovered by ID.
-- **Secure Communication:** JWT-based authentication and role-based access control on the REST API, plus AES-256-GCM encryption of model-update messages exchanged between nodes (keyed by `jwt_secret_key`).
+- **Secure Communication:** JWT-based authentication and role-based access control on the REST API, plus AES-256-GCM encryption of model checkpoints at rest (keyed by `jwt_secret_key`).
 - **Dynamic Node Discovery:** The principal derives a live cluster view from node heartbeats — nodes join by heartbeating and are evicted after `NODE_TTL_MS` of silence. No separate registration step is required.
 - **Consensus & Leader Election:** Uses the Raft protocol (via [`openraft`](https://github.com/datafuselabs/openraft)) for a replicated, consistent log and automatic leader election, over a durable [`sled`](https://github.com/spacejam/sled)-backed log that survives restarts. Principals replicate to each other over HTTP, so a multi-principal cluster tolerates the loss of a minority of its members.
 - **Monitoring and Metrics:** Prometheus metrics for task throughput and latency, plus a `consensus_state` gauge driven by real Raft leadership, and OpenTelemetry tracing.
@@ -168,12 +168,16 @@ consumes from that queue, so the broker spreads the shards across whichever
 workers are alive.
 
 ```
-An scheduler ──(model_shards tasks)──▶ ki_task_queue ──▶ Ki nodes
-                                                            │
-An node ◀────────(gradients)──────── an_task_queue ◀────────┘
+An scheduler ──(model_shards gradient requests)──▶ ki_task_queue ──▶ Ki nodes
+                                                                        │
+An node ◀──────────(gradients + loss)──────── an_task_queue ◀───────────┘
    │
-   └──(after model_shards gradients: average, update)──▶ ki_model_queue ──▶ Ki nodes
+   └──(after model_shards gradients: weighted average, one descent step)
 ```
+
+Each request carries the parameters to evaluate at, so workers hold no model
+state between rounds and a worker can join, restart, or disappear without
+resynchronizing anything.
 
 The shard count is load-bearing rather than a tuning knob: the An node
 accumulates gradients and only publishes an updated model once `model_shards`

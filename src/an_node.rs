@@ -11,19 +11,15 @@ use crate::{
     dataset::DatasetSpec,
     health, logging_metrics, messaging,
     model::MlpSpec,
-    scheduler, security, signals,
+    scheduler, signals,
 };
 use futures_util::stream::StreamExt;
-use lapin::{
-    options::{BasicAckOptions, BasicNackOptions},
-    Channel,
-};
+use lapin::options::{BasicAckOptions, BasicNackOptions};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
-use uuid::Uuid;
+use tracing::{error, info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeliveryDisposition {
@@ -197,30 +193,27 @@ impl AnNodeState {
         self.epochs_completed
     }
 
-    /// Folds one worker's reply into the current epoch, applying the update and
-    /// broadcasting the new model once every shard has reported.
-    pub async fn process_task(
-        &mut self,
-        task: Task,
-        channel: Option<&Channel>,
-    ) -> Result<(), Box<dyn Error>> {
+    /// Folds one worker's reply into the current epoch, applying the update once
+    /// every shard has reported.
+    pub async fn process_task(&mut self, task: Task) -> Result<(), Box<dyn Error>> {
         match task.task_type {
             TaskType::GradientUpdate => {
                 let reply: GradientReply = serde_json::from_str(&task.data)?;
                 self.accumulate(reply)?;
 
                 if self.replies >= self.shards {
-                    let model = self.apply_epoch();
-                    if let Some(ch) = channel {
-                        self.broadcast_model(&model, ch).await?;
-                    }
+                    self.apply_epoch();
                 }
             }
             TaskType::ParameterPull => {
-                if let Some(ch) = channel {
-                    let model = self.parameters.clone();
-                    self.broadcast_model(&model, ch).await?;
-                }
+                // Workers receive parameters in their gradient request, so there
+                // is nothing to push. The variant remains a valid task type for
+                // the REST task API, which is unrelated to training.
+                warn!(
+                    "Ignoring ParameterPull task {}: parameters travel with each \
+                     gradient request",
+                    task.task_id
+                );
             }
         }
         Ok(())
@@ -270,7 +263,7 @@ impl AnNodeState {
     }
 
     /// Applies the accumulated gradient and resets for the next epoch.
-    fn apply_epoch(&mut self) -> Vec<f32> {
+    fn apply_epoch(&mut self) {
         let total = self.accumulated_samples as f32;
         for (parameter, accumulated) in self.parameters.iter_mut().zip(&self.accumulator) {
             *parameter -= self.learning_rate * (accumulated / total);
@@ -291,25 +284,6 @@ impl AnNodeState {
         self.accumulated_samples = 0;
         self.loss_accumulator = 0.0;
         self.replies = 0;
-        self.parameters.clone()
-    }
-
-    async fn broadcast_model(
-        &self,
-        model: &[f32],
-        channel: &Channel,
-    ) -> Result<(), Box<dyn Error>> {
-        let task = Task {
-            task_id: Uuid::new_v4(),
-            task_type: TaskType::ParameterPull,
-            data: serde_json::to_string(model)?,
-        };
-        messaging::declare_queue(channel, "ki_model_queue").await?;
-        // Encrypt the model parameters in transit with the shared node secret.
-        let key = security::message_key()?;
-        messaging::publish_encrypted(channel, "ki_model_queue", &task, &key).await?;
-        info!("Broadcasted model update");
-        Ok(())
     }
 }
 
@@ -466,7 +440,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
     let mut last_checkpointed_epoch = 0_u64;
 
     loop {
-        let (channel, mut consumer) = messaging::connect_with_retries(
+        let (_channel, mut consumer) = messaging::connect_with_retries(
             &amqp_addr,
             queue_name,
             consumer_tag,
@@ -524,7 +498,7 @@ pub async fn run() -> Result<(), Box<dyn Error>> {
                                     let outcome = state
                                         .lock()
                                         .await
-                                        .process_task(task_message, Some(&channel))
+                                        .process_task(task_message)
                                         .await;
                                     if outcome.is_ok() {
                                         logging_metrics::record_task_processed(started_at);
@@ -606,6 +580,7 @@ mod tests {
     use super::*;
     use crate::common::{Task, TaskType};
     use std::io::{Error as IoError, ErrorKind};
+    use uuid::Uuid;
 
     #[test]
     fn test_successful_processing_disposition_acknowledges() {
@@ -687,7 +662,7 @@ mod tests {
         let gradient = vec![1.0_f32; before.len()];
 
         state
-            .process_task(reply_task(gradient, 0.5, 10), None)
+            .process_task(reply_task(gradient, 0.5, 10))
             .await
             .expect("accepted");
 
@@ -709,11 +684,11 @@ mod tests {
         let width = before.len();
 
         state
-            .process_task(reply_task(vec![1.0; width], 1.0, 10), None)
+            .process_task(reply_task(vec![1.0; width], 1.0, 10))
             .await
             .expect("accepted");
         state
-            .process_task(reply_task(vec![4.0; width], 4.0, 20), None)
+            .process_task(reply_task(vec![4.0; width], 4.0, 20))
             .await
             .expect("accepted");
 
@@ -732,7 +707,7 @@ mod tests {
         let before = state.parameters().to_vec();
 
         let err = state
-            .process_task(reply_task(vec![1.0; 3], 0.1, 5), None)
+            .process_task(reply_task(vec![1.0; 3], 0.1, 5))
             .await
             .unwrap_err();
 
@@ -773,7 +748,7 @@ mod tests {
         let width = before.len();
 
         let err = state
-            .process_task(reply_task(vec![f32::INFINITY; width], 0.1, 5), None)
+            .process_task(reply_task(vec![f32::INFINITY; width], 0.1, 5))
             .await
             .unwrap_err();
 
@@ -790,7 +765,7 @@ mod tests {
         let width = state.parameters().len();
 
         let err = state
-            .process_task(reply_task(vec![1.0; width], 0.1, 0), None)
+            .process_task(reply_task(vec![1.0; width], 0.1, 0))
             .await
             .unwrap_err();
 
@@ -843,7 +818,7 @@ mod tests {
     #[cfg(feature = "integration-tests")]
     #[tokio::test]
     async fn test_setup_consumer_workflow() {
-        let (channel, mut consumer) = messaging::connect_with_retries(
+        let (_channel, mut consumer) = messaging::connect_with_retries(
             AMQP_ADDR,
             "test_queue",
             "test_consumer",
