@@ -30,6 +30,12 @@ use crate::model::MlpSpec;
 /// Queue Ki nodes take their work from.
 pub const KI_TASK_QUEUE: &str = "ki_task_queue";
 
+/// Queue Ki nodes publish their gradients back onto, and the An node consumes.
+/// Both ends previously spelled the name out for themselves, which is a
+/// silent-failure waiting to happen: a typo on either side is a node that
+/// connects, consumes nothing, and reports no error.
+pub const AN_RESULT_QUEUE: &str = "an_task_queue";
+
 /// Builds the tasks that make up one epoch: one gradient request per shard,
 /// each naming a different slice of the dataset.
 ///
