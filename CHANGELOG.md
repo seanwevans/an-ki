@@ -31,13 +31,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Restarting a node no longer deletes every saved checkpoint.** `get_pool`
+  runs the migrations on every call and every An node calls it at startup, so
+  migration 003's opening `DROP TABLE IF EXISTS model_checkpoints` ran on each
+  restart — discarding the parameters the node was about to resume from, before
+  it read anything. The reshape is now applied only when the pre-003 `task_id`
+  column is still present.
+- `helm lint` passes again. A Go template comment introduced after a `---`
+  document separator trimmed the newline that terminates it, rendering
+  `---apiVersion: v1` on one line; the chart's Deploy Checks had been failing on
+  every commit since. The headless service now lives in its own file, so there
+  is no separator to trim.
 - The `integration-tests` suite now runs in CI against RabbitMQ and PostgreSQL
   service containers. It previously ran nowhere, so the broker, database, and
   REST API paths had no automated coverage. Several of those tests also returned
   early when their service was unreachable, which made a missing service
   indistinguishable from a passing test; they now fail.
+- The PostgreSQL service container's health check names the role and database it
+  should connect as. `pg_isready` with no arguments connects as the invoking OS
+  user — root — which the image never creates, so the service never reported
+  healthy and the job died before running a test.
 - Integration tests use per-run queue names instead of sharing fixed ones, so
   parallel tests can no longer consume each other's messages.
+- `security::tests` no longer set and clear `JWT_SECRET_KEY` and `RUN_ENV`.
+  Those are process-global, so the API and checkpoint tests could observe a
+  secret another test had set and fail verifying a token minted under a
+  different one. The precedence rules are now tested through an injected lookup.
 
 - Opening the Raft store now retries briefly on I/O failure. sled holds an
   exclusive directory lock that is released when the previous handle drops, so a
@@ -54,6 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   network cannot learn.
 - Default `training_epochs` 10 → 400 and `learning_rate` 0.5 → 1.0: the previous
   values did not converge.
+- The queue Ki nodes publish gradients onto is `scheduler::AN_RESULT_QUEUE`
+  rather than a string literal repeated at both ends, where a typo would produce
+  a node that connects, consumes nothing, and reports no error.
 
 ### Removed
 
