@@ -34,6 +34,14 @@ jobs:
         run: cargo fmt --check
       - name: Test
         run: cargo test
+      # The browser demo in `docs/` ports `dataset` and `model` to JavaScript and
+      # asserts it reproduces these values exactly. Regenerating here means a
+      # change to either module fails this job instead of silently leaving the
+      # page training on data the cluster would not recognise.
+      - name: Demo fixture is current
+        run: |
+          cargo run --quiet --bin demo_fixture > /tmp/reference.json
+          diff -u docs/assets/sim/fixtures/reference.json /tmp/reference.json
 
   # The `integration-tests` feature covers the RabbitMQ, PostgreSQL, and REST
   # API paths. Until now it ran nowhere, so those paths had no automated

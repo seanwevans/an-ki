@@ -4,6 +4,7 @@
 A distributed neural network: a multi-layer perceptron trained data-parallel across a cluster of nodes, with Raft consensus, heartbeat-based discovery, health monitoring, and secure inter-node communication.
 
 ## Table of Contents
+- [Live Demo](#live-demo)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Getting Started](#getting-started)
@@ -20,6 +21,28 @@ A distributed neural network: a multi-layer perceptron trained data-parallel acr
   - [Building](#building)
 - [Contributing](#contributing)
 - [License](#license)
+
+## Live Demo
+
+**[seanwevans.github.io/an-ki](https://seanwevans.github.io/an-ki/)** runs the
+whole system in a browser tab: a principal quorum holding Raft elections, an An
+node dispatching training rounds, Ki workers computing gradients over their own
+shard, and a broker moving the messages. It trains the shipped network to about
+99% accuracy on held-out data while you watch, and it keeps going when you start
+stopping nodes.
+
+It is a simulation, but not a mock-up. The page reimplements `StdRng` closely
+enough that `dataset::generate` and `MlpSpec::initialize` produce the same
+values in JavaScript as they do here, bit for bit — `cargo run --bin
+demo_fixture` prints those values, CI regenerates them on every run, and the
+page checks itself against them on load. The gradients are the same
+backpropagation, checked against finite differences; the An node combines shards
+with the same sample-weighted average, which a test asserts lands on exactly the
+parameters a single machine would have reached.
+
+The source is in [`docs/`](docs/README.md), which also says what is modelled
+rather than real — the broker, consensus and encryption among them — and how to
+run or deploy it.
 
 ## Features
 
@@ -445,6 +468,7 @@ so only `amqp_addr` needs to be configured.
 | `config` | Settings loading from files and environment |
 | `common` | Shared task and node types |
 | `error` | Crate-wide error type |
+| `bin/demo_fixture` | Prints the reference values the browser demo checks itself against |
 | `signals` | Shutdown signal handling |
 
 ## Development
@@ -479,6 +503,21 @@ cargo test --features integration-tests
 
 These run in CI against RabbitMQ and PostgreSQL service containers. See
 [CONTRIBUTING.md](CONTRIBUTING.md#checks) for running them locally.
+
+The browser demo has its own suite, which needs nothing but Node 18 or newer:
+
+```bash
+cd docs && node --test tests/*.test.mjs
+```
+
+It covers the ported generator against the values `demo_fixture` prints, the
+gradients against finite differences, Raft's election and commitment rules, and a
+full training run reaching the documented accuracy. Changing `dataset.rs` or
+`model.rs` means regenerating the fixture in the same commit:
+
+```bash
+cargo run --bin demo_fixture > docs/assets/sim/fixtures/reference.json
+```
 
 ### Building
 

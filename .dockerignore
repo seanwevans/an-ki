@@ -8,6 +8,8 @@
 # Docs and CI not needed to build the binary
 *.md
 /.github
+# The browser demo is a static site, not part of any node image
+/docs
 
 # Deployment manifests (handled outside the image build)
 /helm

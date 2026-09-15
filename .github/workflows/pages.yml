@@ -1,0 +1,62 @@
+# Publishes the browser demo in `docs/` to GitHub Pages.
+#
+# The site is static — no build step, no bundler, no dependencies — so the job
+# checks it and uploads the directory as it stands. Checking first matters: the
+# page claims to generate the same dataset and the same initial weights as the
+# crate, and a deploy that quietly stopped being true would be worse than no
+# deploy at all.
+name: Pages
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "docs/**"
+      - ".github/workflows/pages.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Covers the ported generator against the Rust fixture, the gradients
+      # against finite differences, Raft's election and commitment rules, and a
+      # full training run reaching the accuracy the README claims.
+      - name: Test the simulation
+        working-directory: docs
+        run: node --test tests/*.test.mjs
+
+  deploy:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - id: deploy
+        uses: actions/deploy-pages@v4
