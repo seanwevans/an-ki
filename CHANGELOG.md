@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A browser demo of the whole cluster** at
+  [`docs/`](docs/README.md), deployable to GitHub Pages with no build step. It
+  runs a principal quorum through real Raft elections, dispatches training
+  rounds to Ki workers over a modelled broker, and trains the shipped network to
+  its documented accuracy client side. `StdRng`, `dataset` and `model` are
+  ported closely enough that the page generates the same samples and the same
+  initial weights as the crate, bit for bit; `cargo run --bin demo_fixture`
+  prints the reference values, CI regenerates them, and the page checks itself
+  against them on load.
 - **Real neural network training.** A multi-layer perceptron (`tanh` hidden
   layer, softmax output, cross-entropy loss) with backpropagation verified
   against finite differences, replacing the placeholder computation that

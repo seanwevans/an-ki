@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>an-ki — a distributed neural network, running in your tab</title>
+    <meta
+      name="description"
+      content="A live simulation of the an-ki cluster: Raft consensus, a message broker, and data-parallel training of a real neural network — all client side."
+    />
+    <meta property="og:title" content="an-ki — a distributed neural network, running in your tab" />
+    <meta
+      property="og:description"
+      content="Raft elections, requeued shards, and real backpropagation, simulated in the browser from the same seeds the Rust cluster uses."
+    />
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="assets/style.css" />
+  </head>
+  <body>
+    <header class="masthead">
+      <div class="masthead-inner">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <h1>an&#8209;ki</h1>
+            <p class="tagline">
+              A distributed neural network — principal, An and Ki nodes, Raft consensus, and a
+              message broker — simulated end to end in this page.
+            </p>
+          </div>
+        </div>
+        <div class="masthead-links">
+          <a class="pill" href="https://github.com/seanwevans/an-ki">Source on GitHub</a>
+          <span class="pill pill-quiet" id="conformance" title="Checked against values printed by the Rust crate">
+            checking against the Rust reference…
+          </span>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="intro">
+        <p>
+          Nothing here is a recording. The dataset is generated from its seed by a port of
+          <code>StdRng</code> that matches Rust bit for bit, the gradients are real
+          backpropagation, and the An node combines them exactly as the cluster does — weighted by
+          sample count, stepping only once a full set of shards has arrived. Kill a worker and the
+          broker hands its shard to someone else. Kill the Raft leader and watch the survivors hold
+          an election.
+        </p>
+      </section>
+
+      <section class="toolbar" aria-label="Simulation controls">
+        <div class="toolbar-group">
+          <button id="play" class="control control-primary" type="button">Pause</button>
+          <button id="reset" class="control" type="button">Reset</button>
+        </div>
+        <div class="toolbar-group" role="group" aria-label="Clock speed">
+          <span class="toolbar-label">clock</span>
+          <div class="segmented" id="speed"></div>
+        </div>
+        <div class="toolbar-group readouts">
+          <div class="readout"><span class="readout-label">epoch</span><strong id="stat-epoch">0</strong></div>
+          <div class="readout"><span class="readout-label">loss</span><strong id="stat-loss">—</strong></div>
+          <div class="readout"><span class="readout-label">held-out accuracy</span><strong id="stat-accuracy">—</strong></div>
+          <div class="readout"><span class="readout-label">cluster time</span><strong id="stat-clock">0.0s</strong></div>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="panel panel-wide" id="panel-topology">
+          <header class="panel-head">
+            <h2>Cluster</h2>
+            <p class="panel-note">
+              Click a node to stop or start it. Packets are real messages on their way between a
+              publisher, the broker and a consumer.
+            </p>
+          </header>
+          <div class="canvas-wrap">
+            <canvas id="topology" role="img" aria-label="Live diagram of the cluster"></canvas>
+          </div>
+          <div class="legend" id="topology-legend"></div>
+        </article>
+
+        <article class="panel" id="panel-boundary">
+          <header class="panel-head">
+            <h2>What the model has learned</h2>
+            <p class="panel-note">
+              Points inside the circle are one class, outside it the other — deliberately not
+              linearly separable. The shading is the network's current decision surface.
+            </p>
+          </header>
+          <div class="canvas-wrap canvas-square">
+            <canvas id="boundary" role="img" aria-label="Decision boundary of the network"></canvas>
+          </div>
+          <dl class="mini-stats" id="model-stats"></dl>
+        </article>
+
+        <article class="panel" id="panel-training">
+          <header class="panel-head">
+            <h2>Training</h2>
+            <p class="panel-note">
+              Cross-entropy over the training shards, and accuracy on the held-out fifth no worker
+              ever sees.
+            </p>
+          </header>
+          <div class="canvas-wrap canvas-chart">
+            <canvas id="chart" role="img" aria-label="Loss and accuracy per epoch"></canvas>
+          </div>
+          <div class="chart-legend">
+            <span class="swatch swatch-loss"></span> training loss
+            <span class="swatch swatch-accuracy"></span> held-out accuracy
+            <span class="swatch swatch-checkpoint"></span> checkpoint
+          </div>
+        </article>
+
+        <article class="panel" id="panel-queues">
+          <header class="panel-head">
+            <h2>Broker</h2>
+            <p class="panel-note">
+              Ready messages and messages delivered but not yet acknowledged. Unacknowledged work
+              is what survives a worker's death.
+            </p>
+          </header>
+          <div id="queues" class="queues"></div>
+          <dl class="mini-stats" id="broker-stats"></dl>
+        </article>
+
+        <article class="panel" id="panel-raft">
+          <header class="panel-head">
+            <h2>Consensus</h2>
+            <p class="panel-note">
+              Cluster state lives in a replicated log, not in one process's memory. A majority must
+              hold an entry before it counts as committed.
+            </p>
+          </header>
+          <div id="raft-nodes" class="raft-nodes"></div>
+          <div class="raft-split">
+            <div>
+              <h3 class="subhead">Replicated log</h3>
+              <ol id="raft-log" class="log-entries"></ol>
+            </div>
+            <div>
+              <h3 class="subhead">State machine</h3>
+              <dl id="raft-machine" class="mini-stats"></dl>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel" id="panel-registry">
+          <header class="panel-head">
+            <h2>Membership</h2>
+            <p class="panel-note">
+              Derived entirely from heartbeats: a node joins by beating and is evicted after
+              <code id="ttl-label">30000ms</code> of silence. There is no registration handshake to
+              get wrong.
+            </p>
+          </header>
+          <table class="table" id="registry">
+            <thead>
+              <tr><th>node</th><th>role</th><th>last seen</th><th>state</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </article>
+
+        <article class="panel" id="panel-metrics">
+          <header class="panel-head">
+            <h2>Metrics</h2>
+            <p class="panel-note">The gauges the Grafana dashboard plots, as the nodes report them.</p>
+          </header>
+          <dl class="mini-stats" id="metrics"></dl>
+        </article>
+
+        <article class="panel panel-wide" id="panel-chaos">
+          <header class="panel-head">
+            <h2>Break something</h2>
+            <p class="panel-note">
+              Each of these is a failure the system is built to survive. The log below says what it
+              did about it.
+            </p>
+          </header>
+          <div class="chaos" id="chaos"></div>
+        </article>
+
+        <article class="panel panel-wide" id="panel-log">
+          <header class="panel-head">
+            <h2>Event log</h2>
+            <div class="log-filter" id="log-filter"></div>
+          </header>
+          <ol class="events" id="events"></ol>
+        </article>
+
+        <article class="panel panel-wide" id="panel-settings">
+          <header class="panel-head">
+            <h2>Settings</h2>
+            <p class="panel-note">
+              The same knobs as <code>config/default.toml</code>. Changing one restarts the run,
+              exactly as it would for a real cluster.
+            </p>
+          </header>
+          <div class="settings" id="settings"></div>
+        </article>
+      </section>
+
+      <section class="prose">
+        <h2>What you are looking at</h2>
+        <div class="explainer">
+          <div>
+            <h3>The training is real</h3>
+            <p>
+              A multi-layer perceptron with a <code>tanh</code> hidden layer and a softmax output,
+              trained with cross-entropy. Each worker rebuilds the dataset from its seed, takes only
+              its own shard, runs the forward and backward passes, and returns the mean gradient and
+              loss over those samples. The An node combines the shards weighted by sample count —
+              which is the mean gradient over the whole dataset — and takes one step of gradient
+              descent. With the shipped defaults it reaches about 99% accuracy on data it never
+              trained on.
+            </p>
+            <p>
+              The arithmetic is the same arithmetic. A test in this repository runs 40 epochs across
+              four shards and 40 epochs on one machine and asserts the parameter vectors agree:
+              sharding changes the message flow, not the model.
+            </p>
+          </div>
+          <div>
+            <h3>The failures are real</h3>
+            <p>
+              A delivery stays unacknowledged until a worker has published its reply. Stop a worker
+              mid-round and the broker puts everything it was holding back on the queue for whoever
+              is still alive — the round finishes late instead of never. Stop all of them and the
+              queue grows while the An node sits at <em>n/4 gradients</em>, because a round that
+              never receives a full set never closes.
+            </p>
+            <p>
+              The principals run an actual Raft: randomized election timeouts, the up-to-date check
+              on votes, log matching, and commitment by majority. Stop two of three and the survivor
+              campaigns forever without ever winning, which is why the deployment guide tells you to
+              run an odd number.
+            </p>
+          </div>
+          <div>
+            <h3>What is simulated</h3>
+            <p>
+              The broker is a model of RabbitMQ's dispatch, acknowledgement and requeue behaviour,
+              not RabbitMQ. Consensus is a compact Raft rather than <code>openraft</code> over
+              <code>sled</code>. There is no database, no JWT, and no TLS on this page; encryption
+              at rest is reported in the log, not performed.
+            </p>
+            <p>
+              Time is scaled so a packet is visible: links carry about 45ms of latency and a shard
+              takes tens of milliseconds to compute, against a 400ms epoch. The shipped configuration
+              dispatches every 100ms onto a local broker, where a round closes long before the next
+              one starts.
+            </p>
+          </div>
+        </div>
+
+        <h2>Where each piece lives</h2>
+        <ul class="mapping" id="mapping"></ul>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>
+        Served as a static page — no backend, no build step, no network calls after load. The
+        simulation is a port of the Rust crate it ships with; the dataset and the initial weights are
+        checked against values printed by that crate on every run of the test suite.
+      </p>
+      <p class="footer-links">
+        <a href="https://github.com/seanwevans/an-ki">Repository</a>
+        <a href="https://github.com/seanwevans/an-ki/blob/main/README.md">README</a>
+        <a href="https://github.com/seanwevans/an-ki/blob/main/docs/README.md">How this page is built</a>
+      </p>
+    </footer>
+
+    <script type="module" src="assets/app.js"></script>
+  </body>
+</html>
